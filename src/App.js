@@ -660,10 +660,10 @@ const convertLead = async (lead, jobData) => {
       serviceType: jobData.serviceType, 
       rate: jobData.rate,
       isRecurring: jobData.serviceFrequency !== 'One-Time' && jobData.serviceFrequency !== 'As-Needed',
-      // frequency: jobData.serviceFrequency,
-      // seriesId: `series_${Date.now()}`, // Unique ID for this job series
-      // baseJobId: jobId, // Original job ID
-      // nextJobDate: getNextServiceDate(jobData.scheduledDate, jobData.serviceFrequency), 
+      frequency: jobData.serviceFrequency,
+      seriesId: `series_${Date.now()}`, // Unique ID for this job series
+      baseJobId: jobId, // Original job ID
+      nextJobDate: getNextServiceDate(jobData.scheduledDate, jobData.serviceFrequency), 
       status: 'Scheduled', 
       notes: jobData.notes || '', 
       manHours: jobData.manHours,
@@ -1107,7 +1107,7 @@ const timeChartData = {
 
   {/* Rows */}
   {leads.map((lead, idx) => (
-    <div className="table-row" key={idx}>
+    <div className="table-row leads" key={idx}>
       <div className="grid-cell">
         <span className="mobile-label">Name</span>
         {lead.firstName} {lead.lastName}
@@ -1246,47 +1246,125 @@ const timeChartData = {
               {properties.length === 0 ? (
                 <div className="empty-state">no properties yet.</div>
               ) : (
-                <div className="table-container">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>Customer</th>
-                        <th>Address</th>
-                        <th>Service Frequency</th>
-                        <th>Rate</th>
-                        <th>Sqft</th>
-                        <th>Sqft/$</th>
-                        <th>Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {properties.map(property => {
-                        const customer = customers.find(c => {
-                          const customerNumber = parseInt(c.customerId.split('-')[1]);
-                          return customerNumber === property.customerNumber;
-                        });
-                        return (
-                          <tr key={property.propertyId}>
-                            <td>
-                              {customer ? `${customer.firstName} ${customer.lastName}` : 'Unknown Customer'}
-                              <div className="text-muted">ID: {property.propertyId}</div>
-                            </td>
-                            <td>{property.serviceAddress}</td>
-                            <td>{property.serviceFrequency}</td>
-                            <td>{formatCurrency(property.rate)}</td>
-                            <td>{property.propertySqft || 'N/A'}</td>
-                            <td>{property.sqftPerDollar?.toFixed(2) || 'N/A'}</td>
-                            <td>
-                              <span className={`status-badge status-${property.active ? 'active' : 'inactive'}`}>
-                                {property.active ? 'Active' : 'Inactive'}
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+               
+                  <div className="table-container">
+  <div className="responsive-table">
+    {/* Table Header - Hidden on mobile */}
+    <div className="table-header">
+      <div className="header-cell">Customer</div>
+      <div className="header-cell">Address</div>
+      <div className="header-cell">Services</div>
+      <div className="header-cell">Avg $/Hr</div>
+      <div className="header-cell">Sqft</div>
+      <div className="header-cell">Last Service</div>
+      <div className="header-cell">Next Service</div>
+    </div>
+    
+    {/* Table Body */}
+    <div className="table-body">
+      {properties.map(property => {
+        const customer = customers.find(c => {
+          const customerNumber = parseInt(c.customerId.split('-')[1]);
+          return customerNumber === property.customerNumber;
+        });
+        
+        // Get all jobs for this property
+        const propertyJobs = jobs.filter(j => 
+          j.properties?.includes(property.propertyId)
+        );
+        
+        // Calculate average dollars per man-hour
+        const avgDollarsPerHour = propertyJobs.length > 0 
+          ? (propertyJobs.reduce((sum, job) => sum + ((job.rate || 0) / (job.manHours || 1)), 0) / propertyJobs.length)
+          : 0;
+        
+        // Get unique service types
+        const services = [...new Set(propertyJobs.map(job => job.serviceType))];
+        
+        // Get last and next service dates
+        const lastService = propertyJobs.length > 0
+          ? new Date(Math.max(...propertyJobs.map(j => new Date(j.scheduledDate))))
+          : null;
+          
+        const nextService = property.nextServiceDate 
+          ? new Date(property.nextServiceDate)
+          : null;
+
+        return (
+          <div className="table-row" key={property.propertyId}>
+            {/* Customer */}
+            <div className="grid-cell">
+              <div className="mobile-label">Customer</div>
+              <div className="customer-info">
+                <div className="customer-name">
+                  {customer ? `${customer.firstName} ${customer.lastName}` : 'Unknown Customer'}
                 </div>
+                <div className="text-muted customer-id">ID: {property.propertyId}</div>
+              </div>
+            </div>
+            
+            {/* Address */}
+            <div className="grid-cell">
+              <div className="mobile-label">Address</div>
+              <div className="property-address">{property.serviceAddress}</div>
+            </div>
+            
+            {/* Services */}
+            <div className="grid-cell">
+              <div className="mobile-label">Services</div>
+              <div className="property-services">
+                {services.length > 0 ? (
+                  <ul className="services-list">
+                    {services.map((service, i) => (
+                      <li key={i} className="service-item">
+                        {service}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <span className="text-muted">No services</span>
+                )}
+              </div>
+            </div>
+            
+            {/* Avg $/Hour */}
+            <div className="grid-cell">
+              <div className="mobile-label">Avg $/Hr</div>
+              <div className="property-rate">
+                {avgDollarsPerHour > 0 ? formatCurrency(avgDollarsPerHour) : 'N/A'}
+              </div>
+            </div>
+            
+            {/* Sqft */}
+            <div className="grid-cell">
+              <div className="mobile-label">Sqft</div>
+              <div className="property-sqft">
+                {property.propertySqft ? `${property.propertySqft.toLocaleString()}` : 'N/A'}
+              </div>
+            </div>
+            
+            {/* Last Service */}
+            <div className="grid-cell">
+              <div className="mobile-label">Last Service</div>
+              <div className="property-last-service">
+                {lastService ? lastService.toLocaleDateString() : 'N/A'}
+              </div>
+            </div>
+            
+            {/* Next Service */}
+            <div className="grid-cell">
+              <div className="mobile-label">Next Service</div>
+              <div className="property-next-service">
+                {nextService ? nextService.toLocaleDateString() : 'N/A'}
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  </div>
+</div>
+               
               )}
             </div>
           )}
@@ -1313,64 +1391,93 @@ const timeChartData = {
                   <p className="text-sm">Convert a lead or create a job to add to the route.</p>
                 </div>
               ) : (
-                <div className="table-container">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th>customer</th>
-                        <th>on site</th>
-                        <th>off site</th>
-                        <th>man hrs</th>
-                        <th>$/hr</th>
-                        <th>revenue</th>
-                        <th>invoice sent</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredRouting.map(route => {
-                        const routeId = `${route.date}-${route.customerNumber}`;
-                        return (
-                          <tr key={routeId}>
-                            <td>
-                              <div>{route.customerNameFirst} {route.customerNameLast}</div>
-                              <div className="text-muted">{route.serviceAddress}</div>
-                              <div className="text-muted">{route.jobType}</div>
-                            </td>
-                            <td>
-                              <input 
-                                type="time" 
-                                value={route.onSite || ''} 
-                                onChange={(e) => handleRouteUpdate(routeId, 'onSite', e.target.value)}
-                                className="table-input-time"
-                              />
-                            </td>
-                            <td>
-                              <input 
-                                type="time" 
-                                value={route.offSite || ''} 
-                                onChange={(e) => handleRouteUpdate(routeId, 'offSite', e.target.value)}
-                                className="table-input-time"
-                              />
-                            </td>
-                            <td>{parseFloat(route.manHours || 0).toFixed(2)}</td>
-                            <td>{formatCurrency(route.dollarsPerManHour || 0)}</td>
-                            <td>{formatCurrency(route.revenue || 0)}</td>
-                            <td>
-                              <select 
-                                value={route.invoiceSent || 'No'} 
-                                onChange={(e) => handleRouteUpdate(routeId, 'invoiceSent', e.target.value)}
-                                className="table-select"
-                              >
-                                <option value="No">No</option>
-                                <option value="Yes">Yes</option>
-                              </select>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+               <div className="table-container">
+  <div className="responsive-table">
+    {/* Header Row */}
+    <div className="table-header">
+      <div className="header-cell">Customer</div>
+      <div className="header-cell">On Site</div>
+      <div className="header-cell">Off Site</div>
+      <div className="header-cell">Man Hrs</div>
+      <div className="header-cell">$/Hr</div>
+      <div className="header-cell">Revenue</div>
+      <div className="header-cell">Invoice Sent</div>
+    </div>
+
+    {/* Body Rows */}
+    <div className="table-body">
+      {filteredRouting.map(route => {
+        const routeId = `${route.date}-${route.customerNumber}`;
+        return (
+          <div className="table-row" key={routeId}>
+            {/* Customer Column */}
+            <div className="grid-cell">
+              <div className="mobile-label">Customer</div>
+              <div>
+                <div>{route.customerNameFirst} {route.customerNameLast}</div>
+                <div className="text-muted">{route.serviceAddress}</div>
+                <div className="text-muted">{route.jobType}</div>
+              </div>
+            </div>
+
+            {/* On Site Time */}
+            <div className="grid-cell">
+              <div className="mobile-label">On Site</div>
+              <input
+                type="time"
+                value={route.onSite || ''}
+                onChange={(e) => handleRouteUpdate(routeId, 'onSite', e.target.value)}
+                className="table-input-time"
+              />
+            </div>
+
+            {/* Off Site Time */}
+            <div className="grid-cell">
+              <div className="mobile-label">Off Site</div>
+              <input
+                type="time"
+                value={route.offSite || ''}
+                onChange={(e) => handleRouteUpdate(routeId, 'offSite', e.target.value)}
+                className="table-input-time"
+              />
+            </div>
+
+            {/* Man Hours */}
+            <div className="grid-cell">
+              <div className="mobile-label">Man Hrs</div>
+              <div>{parseFloat(route.manHours || 0).toFixed(2)}</div>
+            </div>
+
+            {/* Dollars per Hour */}
+            <div className="grid-cell">
+              <div className="mobile-label">$/Hr</div>
+              <div>{formatCurrency(route.dollarsPerManHour || 0)}</div>
+            </div>
+
+            {/* Revenue */}
+            <div className="grid-cell">
+              <div className="mobile-label">Revenue</div>
+              <div>{formatCurrency(route.revenue || 0)}</div>
+            </div>
+
+            {/* Invoice Sent */}
+            <div className="grid-cell">
+              <div className="mobile-label">Invoice Sent</div>
+              <select
+                value={route.invoiceSent || 'No'}
+                onChange={(e) => handleRouteUpdate(routeId, 'invoiceSent', e.target.value)}
+                className="table-select"
+              >
+                <option value="No">No</option>
+                <option value="Yes">Yes</option>
+              </select>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  </div>
+</div>
               )}
             </div>
           )}
