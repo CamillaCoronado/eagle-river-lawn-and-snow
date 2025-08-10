@@ -714,38 +714,132 @@ const Dashboard = () => {
 useEffect(() => {
   const unsubscribers = [];
 
-  let hasInitialLoad = false; // prevent multiple google sheets calls
-
   const leadsUnsub = onSnapshot(collection(db, 'leads'), async (snapshot) => {
     try {
-      const leadsData = snapshot.docs.map(doc => ({ 
-        id: doc.id, 
-        ...doc.data() 
+      const leadsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        firstName: doc.data().firstName || '',
+        lastName: doc.data().lastName || '',
+        phoneNumber: doc.data().phoneNumber || '',
+        email: doc.data().email || '',
+        address: doc.data().address || '',
+        status: doc.data().status || 'New'
       }));
       setLeads(leadsData);
 
-      // only fetch from google sheets on the FIRST load, not every snapshot
-      if (!hasInitialLoad) {
-        hasInitialLoad = true;
-        console.log('attempting to fetch from google sheets...');
+      console.log('Attempting to fetch from Google Sheets...');
+      
+      // 1. First test if the endpoint is reachable
+      let response;
+      try {
+        // Add timestamp to bypass caching
+        const url = new URL('https://script.google.com/macros/s/AKfycbwXKUoplWQ9jeHf-px5zjJfTdxajb6IYPdr2H2BQWBNTsVlUbQ5N2Q4e9c-SzPunf9qhQ/exec');
+        url.searchParams.append('t', Date.now());
+
+        response = await fetch(url.toString(), {
+          method: 'GET',
+          mode: 'cors',
+          cache: 'no-cache',
+          redirect: 'follow',
+          credentials: 'omit',
+          headers: {
+            'Content-Type': 'text/plain' // Required for Google Scripts
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! Status: ${response.status}`);
+        }
+
+        // 2. Verify we actually got JSON back
+        const responseText = await response.text();
+        console.log('Raw response:', responseText);
         
-        // your google sheets fetch logic here...
-        // (rest of your existing google sheets code stays the same)
+        let sheetLeads;
+        try {
+          sheetLeads = JSON.parse(responseText);
+        } catch (e) {
+          throw new Error('Failed to parse JSON: ' + e.message);
+        }
+
+        if (!Array.isArray(sheetLeads)) {
+          throw new Error('Expected array but got: ' + typeof sheetLeads);
+        }
+
+        console.log('Successfully fetched', sheetLeads.length, 'leads from sheet');
+
+        // 3. Process new leads
+        const existingLeadKeys = new Set(
+          leadsData.map(lead => 
+            `${lead.firstName?.toLowerCase()}-${lead.lastName?.toLowerCase()}-${lead.phoneNumber?.toLowerCase()}`
+          )
+        );
+
+        const newLeads = sheetLeads.filter(lead => {
+          const leadKey = `${lead.firstName?.toLowerCase()}-${lead.lastName?.toLowerCase()}-${lead.phoneNumber?.toLowerCase()}`;
+          return !existingLeadKeys.has(leadKey);
+        });
+
+        console.log('Found', newLeads.length, 'new leads to import');
+
+        if (newLeads.length > 0) {
+          const batch = writeBatch(db);
+          newLeads.forEach((lead, index) => {
+            const leadRef = doc(collection(db, 'leads'));
+            batch.set(leadRef, {
+              ...lead,
+              status: 'New',
+              createdAt: serverTimestamp(),
+              source: 'Google Sheets Import'
+            });
+            console.log(`Preparing to import lead ${index + 1}:`, lead.firstName, lead.lastName);
+          });
+
+          try {
+            await batch.commit();
+            console.log('Successfully imported', newLeads.length, 'leads');
+          } catch (batchError) {
+            console.error('Batch commit failed:', batchError);
+            throw new Error('Failed to write to Firestore: ' + batchError.message);
+          }
+        } else {
+          console.log('No new leads to import');
+        }
+
+      } catch (fetchError) {
+        console.error('Fetch/processing error:', {
+          error: fetchError,
+          response: response ? {
+            status: response.status,
+            statusText: response.statusText,
+            url: response.url
+          } : 'No response received'
+        });
         
-      } else {
-        console.log('skipping google sheets fetch - not initial load');
+        // User-friendly error notification
+        setOperationMessage({
+          show: true,
+          text: 'Failed to sync with Google Sheets. Please check console for details.',
+          isError: true
+        });
       }
     } catch (outerError) {
-      console.error('unexpected error in leads processing:', outerError);
-      alert('an unexpected error occurred. please try again later.');
+      console.error('Unexpected error in leads processing:', outerError);
+      setOperationMessage({
+        show: true,
+        text: 'An unexpected error occurred during Google Sheets sync.',
+        isError: true
+      });
     }
   });
 
   unsubscribers.push(leadsUnsub);
 
+  // Keep your existing listeners for customers, properties, jobs, routing
   const customersUnsub = onSnapshot(collection(db, 'customers'), (snapshot) => {
-  setCustomers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-});
+    setCustomers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+  });
   unsubscribers.push(customersUnsub);
 
   const propertiesUnsub = onSnapshot(collection(db, 'properties'), (snapshot) => {
@@ -766,7 +860,6 @@ useEffect(() => {
   return () => {
     unsubscribers.forEach(unsub => unsub());
   };
-
 }, []);
 
 const handleJobUpdate = async (updatedJob, scope) => {
