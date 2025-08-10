@@ -250,8 +250,8 @@ const NewJobModal = ({
     scheduledDate: new Date().toISOString().split('T')[0],
     serviceFrequency: 'Weekly',
     notes: '',
-    serviceAddress: '', // Added this field
-    isNewProperty: false // Added to track if we're adding a new property
+    useExistingAddress: true,
+    newAddress: ''
   });
 
   const currentRate = useMemo(() => {
@@ -271,44 +271,39 @@ const NewJobModal = ({
     return properties.find(p => p.propertyId === jobData.propertyId);
   }, [jobData.propertyId, properties]);
 
+  if (!isOpen) return null;
+
   const handleSubmit = (e) => {
     e.preventDefault();
     
     // Validate required fields
-    if (!jobData.customerId) {
-      alert('Please select a customer');
+    if (!jobData.customerId || !jobData.scheduledDate) {
+      alert('Please select a customer and scheduled date');
       return;
     }
-    
-    if (!jobData.scheduledDate) {
-      alert('Please select a scheduled date');
-      return;
-    }
-    
-    if (jobData.propertyId === 'new' && !jobData.serviceAddress) {
+
+    // If using a new address, ensure it's provided
+    if (!jobData.useExistingAddress && !jobData.newAddress) {
       alert('Please enter a service address');
-      return;
-    }
-    
-    if (!jobData.propertyId && !jobData.serviceAddress) {
-      alert('Please select a property or enter a service address');
       return;
     }
 
     // Prepare job data
     const finalJobData = {
       ...jobData,
-      rate: currentRate,
+      rate: jobData.bidType === 'hourly' 
+        ? parseFloat(jobData.hourlyRate) * parseFloat(jobData.estimatedHours)
+        : parseFloat(jobData.rate),
       manHours: jobData.bidType === 'hourly' ? parseFloat(jobData.estimatedHours) : 0,
-      serviceAddress: jobData.isNewProperty ? jobData.serviceAddress : selectedProperty?.serviceAddress,
-      propertyId: jobData.isNewProperty ? null : jobData.propertyId
+      serviceAddress: jobData.useExistingAddress 
+        ? selectedProperty?.serviceAddress 
+        : jobData.newAddress,
+      // Include propertyId only if using existing property
+      propertyId: jobData.useExistingAddress ? jobData.propertyId : null
     };
 
     onCreateJob(finalJobData);
-    onClose();
   };
-
-  if (!isOpen) return null;
 
   return (
     <div className="modal-overlay">
@@ -317,16 +312,11 @@ const NewJobModal = ({
           <h2>Create New Job</h2>
         </div>
         <form onSubmit={handleSubmit} className="modal-form">
-          <div className="form-group">
+          <div>
             <label className="form-label">Customer</label>
             <select 
               value={jobData.customerId} 
-              onChange={(e) => setJobData({
-                ...jobData, 
-                customerId: e.target.value,
-                propertyId: '',
-                isNewProperty: false
-              })}
+              onChange={(e) => setJobData({...jobData, customerId: e.target.value, propertyId: ''})}
               className="form-select"
               required
             >
@@ -341,44 +331,43 @@ const NewJobModal = ({
 
           {jobData.customerId && (
             <>
-              <div className="form-group">
+              <div>
                 <label className="form-label">Property</label>
-                <select
-                  value={jobData.propertyId || ''}
-                  onChange={(e) => {
-                    const isNew = e.target.value === 'new';
-                    setJobData({
+                <div className="property-selection">
+                  <select
+                    value={jobData.propertyId || ''}
+                    onChange={(e) => setJobData({
                       ...jobData, 
-                      propertyId: isNew ? 'new' : e.target.value,
-                      isNewProperty: isNew,
-                      serviceAddress: isNew ? '' : (properties.find(p => p.propertyId === e.target.value)?.serviceAddress || '')
-                    });
-                  }}
-                  className="form-select"
-                >
-                  <option value="">Select Property</option>
-                  {customerProperties.map(property => (
-                    <option key={property.propertyId} value={property.propertyId}>
-                      {property.serviceAddress}
-                    </option>
-                  ))}
-                  <option value="new">+ Add New Property</option>
-                </select>
+                      propertyId: e.target.value,
+                      useExistingAddress: true
+                    })}
+                    className="form-select"
+                  >
+                    <option value="">Select Property or Add New</option>
+                    {customerProperties.map(property => (
+                      <option key={property.propertyId} value={property.propertyId}>
+                        {property.serviceAddress}
+                      </option>
+                    ))}
+                    <option value="new">+ Add New Property</option>
+                  </select>
+                </div>
               </div>
 
-              {jobData.isNewProperty && (
-                <div className="form-group">
+              {(jobData.propertyId === 'new' || !jobData.propertyId) && (
+                <div>
                   <label className="form-label">Service Address</label>
                   <input
                     type="text"
-                    value={jobData.serviceAddress}
+                    value={jobData.newAddress}
                     onChange={(e) => setJobData({
                       ...jobData, 
-                      serviceAddress: e.target.value
+                      newAddress: e.target.value,
+                      useExistingAddress: false
                     })}
                     className="form-input"
                     placeholder="Enter service address"
-                    required={jobData.isNewProperty}
+                    required
                   />
                 </div>
               )}
@@ -386,30 +375,22 @@ const NewJobModal = ({
           )}
 
           <div className="form-grid">
-            <div className="form-group">
+            <div>
               <label className="form-label">Service Type</label>
               <select 
                 value={jobData.serviceType} 
                 onChange={(e) => setJobData({...jobData, serviceType: e.target.value})}
                 className="form-select"
               >
-                <option value="First Time Mowing">First time Mowing</option>
-                <option value="Bag Haul">Bag Haul</option>
                 <option value="Mowing">Mowing</option>
-                <option value="Spring Cleanup">Spring cleanup</option>
-                <option value="Spring Fertilizer">Spring Fertilizer</option>
-                <option value="Spring Lime">Spring Lime</option>
-                <option value="Summer Fertilizer">Summer Fertilizer</option>
-                <option value="Fall Fertilizer">Spring Fertilizer</option>
-                <option value="Fall Lime">Spring Lime</option>
-                <option value="Leaf Removal">Leaf removal</option>
-                <option value="Fall Cleanup">Fall cleanup</option>
-                <option value="Snow Removal">Snow removal</option>
-                <option value="Misc">Miscellaneous</option>
+                <option value="Snow Removal">Snow Removal</option>
+                <option value="Leaf Removal">Leaf Removal</option>
+                <option value="Spring Cleanup">Spring Cleanup</option>
+                <option value="Fall Cleanup">Fall Cleanup</option>
+                <option value="Other">Other</option>
               </select>
             </div>
-            
-            <div className="form-group">
+            <div>
               <label className="form-label">Scheduled Date</label>
               <input 
                 type="date" 
@@ -419,8 +400,7 @@ const NewJobModal = ({
                 required 
               />
             </div>
-            
-            <div className="form-group">
+            <div>
               <label className="form-label">Pricing Type</label>
               <select 
                 value={jobData.bidType} 
@@ -433,7 +413,7 @@ const NewJobModal = ({
             </div>
             
             {jobData.bidType === 'bid' ? (
-              <div className="form-group">
+              <div>
                 <label className="form-label">Bid Amount ($)</label>
                 <input 
                   type="number" 
@@ -447,7 +427,7 @@ const NewJobModal = ({
               </div>
             ) : (
               <>
-                <div className="form-group">
+                <div>
                   <label className="form-label">Hourly Rate ($)</label>
                   <input 
                     type="number" 
@@ -458,7 +438,7 @@ const NewJobModal = ({
                     required 
                   />
                 </div>
-                <div className="form-group">
+                <div>
                   <label className="form-label">Estimated Hours</label>
                   <input 
                     type="number" 
@@ -469,14 +449,14 @@ const NewJobModal = ({
                     required 
                   />
                 </div>
-                <div className="form-group">
+                <div>
                   <label className="form-label">Total ($)</label>
                   <div className="form-display-field">{formatCurrency(currentRate)}</div>
                 </div>
               </>
             )}
             
-            <div className="form-group">
+            <div>
               <label className="form-label">Service Frequency</label>
               <select 
                 value={jobData.serviceFrequency} 
@@ -490,20 +470,9 @@ const NewJobModal = ({
                 <option value="As-Needed">As-Needed</option>
               </select>
             </div>
-            
-            <div className="form-group">
-              <label className="form-label">Property sqft</label>
-              <input 
-                type="number" 
-                value={jobData.propertySqft} 
-                onChange={(e) => setJobData({...jobData, propertySqft: e.target.value})}
-                className="form-input" 
-                placeholder="5000" 
-              />
-            </div>
           </div>
 
-          <div className="form-group">
+          <div>
             <label className="form-label">Notes</label>
             <textarea 
               value={jobData.notes} 
@@ -515,12 +484,8 @@ const NewJobModal = ({
           </div>
 
           <div className="modal-actions">
-            <button type="button" onClick={onClose} className="btn btn-secondary">
-              Cancel
-            </button>
-            <button type="submit" className="btn btn-primary">
-              Create Job
-            </button>
+            <button type="button" onClick={onClose} className="btn btn-secondary">Cancel</button>
+            <button type="submit" className="btn btn-primary">Create Job</button>
           </div>
         </form>
       </div>
@@ -687,6 +652,196 @@ const OperationMessageModal = ({ isOpen, message, isError, onClose }) => {
   );
 };
 
+const EditCustomerModal = ({ isOpen, onClose, customer, onSave }) => {
+  const [editedCustomer, setEditedCustomer] = useState(customer || {});
+
+  useEffect(() => {
+    setEditedCustomer(customer || {});
+  }, [customer]);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const success = await onSave(editedCustomer);
+    if (success) onClose();
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal-content">
+        <div className="modal-header">
+          <h2>edit customer</h2>
+        </div>
+        
+        <form onSubmit={handleSubmit} className="modal-form">
+          <div className="form-grid">
+            <div>
+              <label className="form-label">first name</label>
+              <input
+                type="text"
+                value={editedCustomer.firstName || ''}
+                onChange={(e) => setEditedCustomer({...editedCustomer, firstName: e.target.value})}
+                className="form-input"
+                required
+              />
+            </div>
+            <div>
+              <label className="form-label">last name</label>
+              <input
+                type="text"
+                value={editedCustomer.lastName || ''}
+                onChange={(e) => setEditedCustomer({...editedCustomer, lastName: e.target.value})}
+                className="form-input"
+                required
+              />
+            </div>
+          </div>
+          
+          <div>
+            <label className="form-label">phone number</label>
+            <input
+              type="tel"
+              value={editedCustomer.phoneNumber || ''}
+              onChange={(e) => setEditedCustomer({...editedCustomer, phoneNumber: e.target.value})}
+              className="form-input"
+              required
+            />
+          </div>
+          
+          <div>
+            <label className="form-label">email</label>
+            <input
+              type="email"
+              value={editedCustomer.email || ''}
+              onChange={(e) => setEditedCustomer({...editedCustomer, email: e.target.value})}
+              className="form-input"
+            />
+          </div>
+          
+          <div className="modal-actions">
+            <button type="button" onClick={onClose} className="btn btn-secondary">
+              cancel
+            </button>
+            <button type="submit" className="btn btn-primary">
+              save changes
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+const EditPropertyModal = ({ isOpen, onClose, property, onSave }) => {
+  const [editedProperty, setEditedProperty] = useState(property || {});
+
+   const sqftPerDollar = useMemo(() => {
+    const sqft = parseFloat(editedProperty.propertySqft) || 0;
+    const rate = parseFloat(editedProperty.rate) || 0;
+    return rate > 0 ? (sqft / rate).toFixed(2) : '0.00';
+  }, [editedProperty.propertySqft, editedProperty.rate]);
+
+  useEffect(() => {
+    setEditedProperty(property || {});
+  }, [property]);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const success = await onSave(editedProperty);
+    if (success) onClose();
+  };
+
+ 
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal-content">
+        <div className="modal-header">
+          <h2>edit property</h2>
+        </div>
+        
+        <form onSubmit={handleSubmit} className="modal-form">
+          <div>
+            <label className="form-label">service address</label>
+            <input
+              type="text"
+              value={editedProperty.serviceAddress || ''}
+              onChange={(e) => setEditedProperty({...editedProperty, serviceAddress: e.target.value})}
+              className="form-input"
+              required
+            />
+          </div>
+          
+          <div className="form-grid">
+            <div>
+              <label className="form-label">rate ($)</label>
+              <input
+                type="number"
+                step="0.01"
+                value={editedProperty.rate || ''}
+                onChange={(e) => setEditedProperty({...editedProperty, rate: parseFloat(e.target.value) || 0})}
+                className="form-input"
+              />
+            </div>
+            <div>
+              <label className="form-label">property sqft</label>
+              <input
+                type="number"
+                value={editedProperty.propertySqft || ''}
+                onChange={(e) => setEditedProperty({...editedProperty, propertySqft: parseFloat(e.target.value) || 0})}
+                className="form-input"
+              />
+            </div>
+          </div>
+          
+          <div className="form-grid">
+            <div>
+              <label className="form-label">service frequency</label>
+              <select
+                value={editedProperty.serviceFrequency || 'Weekly'}
+                onChange={(e) => setEditedProperty({...editedProperty, serviceFrequency: e.target.value})}
+                className="form-select"
+              >
+                <option value="Weekly">weekly</option>
+                <option value="Bi-Weekly">bi-weekly</option>
+                <option value="Monthly">monthly</option>
+                <option value="One-Time">one-time</option>
+                <option value="As-Needed">as-needed</option>
+              </select>
+            </div>
+            <div>
+              <label className="form-label">sqft per dollar</label>
+              <div className="form-display-field">{sqftPerDollar}</div>
+            </div>
+          </div>
+          
+          <div>
+            <label className="form-label">next service date</label>
+            <input
+              type="date"
+              value={editedProperty.nextServiceDate || ''}
+              onChange={(e) => setEditedProperty({...editedProperty, nextServiceDate: e.target.value})}
+              className="form-input"
+            />
+          </div>
+          
+          <div className="modal-actions">
+            <button type="button" onClick={onClose} className="btn btn-secondary">
+              cancel
+            </button>
+            <button type="submit" className="btn btn-primary">
+              save changes
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
 // Main Dashboard Component
 const Dashboard = () => {
   const [leads, setLeads] = useState([]);
@@ -699,6 +854,11 @@ const Dashboard = () => {
   const [newJobModalOpen, setNewJobModalOpen] = useState(false);
   const [selectedLead, setSelectedLead] = useState(null);
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+
+  const [editCustomerModalOpen, setEditCustomerModalOpen] = useState(false);
+  const [editPropertyModalOpen, setEditPropertyModalOpen] = useState(false);
+  const [customerToEdit, setCustomerToEdit] = useState(null);
+  const [propertyToEdit, setPropertyToEdit] = useState(null);
 
   const [activeMenu, setActiveMenu] = useState(null); // Tracks which job's menu is open
   const [jobToEdit, setJobToEdit] = useState(null);
@@ -714,42 +874,147 @@ const Dashboard = () => {
 useEffect(() => {
   const unsubscribers = [];
 
-  let hasInitialLoad = false; // prevent multiple google sheets calls
-
   const leadsUnsub = onSnapshot(collection(db, 'leads'), async (snapshot) => {
     try {
-      const leadsData = snapshot.docs.map(doc => ({ 
-        id: doc.id, 
-        ...doc.data() 
+      const leadsData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        firstName: doc.data().firstName || '',
+        lastName: doc.data().lastName || '',
+        phoneNumber: doc.data().phoneNumber || '',
+        email: doc.data().email || '',
+        address: doc.data().address || '',
+        status: doc.data().status || 'New'
       }));
       setLeads(leadsData);
 
-      // only fetch from google sheets on the FIRST load, not every snapshot
-      if (!hasInitialLoad) {
-        hasInitialLoad = true;
-        console.log('attempting to fetch from google sheets...');
+      console.log('Attempting to fetch from Google Sheets...');
+      
+      // 1. First test if the endpoint is reachable
+      let response;
+      try {
+        // Add timestamp to bypass caching
+        const url = new URL('https://script.google.com/macros/s/AKfycbwXKUoplWQ9jeHf-px5zjJfTdxajb6IYPdr2H2BQWBNTsVlUbQ5N2Q4e9c-SzPunf9qhQ/exec');
+        url.searchParams.append('t', Date.now());
+
+        response = await fetch(url.toString(), {
+          method: 'GET',
+          mode: 'cors',
+          cache: 'no-cache',
+          redirect: 'follow',
+          credentials: 'omit',
+          headers: {
+            'Content-Type': 'text/plain' // Required for Google Scripts
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! Status: ${response.status}`);
+        }
+
+        // 2. Verify we actually got JSON back
+        const responseText = await response.text();
+        console.log('Raw response:', responseText);
         
-        // your google sheets fetch logic here...
-        // (rest of your existing google sheets code stays the same)
+        let sheetLeads;
+        try {
+          sheetLeads = JSON.parse(responseText);
+        } catch (e) {
+          throw new Error('Failed to parse JSON: ' + e.message);
+        }
+
+        if (!Array.isArray(sheetLeads)) {
+          throw new Error('Expected array but got: ' + typeof sheetLeads);
+        }
+
+        console.log('Successfully fetched', sheetLeads.length, 'leads from sheet');
+
+        // 3. Process new leads
+        const existingLeadKeys = new Set(
+          leadsData.map(lead => 
+            `${lead.firstName?.toLowerCase()}-${lead.lastName?.toLowerCase()}-${lead.phoneNumber?.toLowerCase()}`
+          )
+        );
+
+        const newLeads = sheetLeads.filter(lead => {
+          const leadKey = `${lead.firstName?.toLowerCase()}-${lead.lastName?.toLowerCase()}-${lead.phoneNumber?.toLowerCase()}`;
+          return !existingLeadKeys.has(leadKey);
+        });
+
+        console.log('Found', newLeads.length, 'new leads to import');
+
+        if (newLeads.length > 0) {
+          const batch = writeBatch(db);
+          newLeads.forEach((lead, index) => {
+            const leadRef = doc(collection(db, 'leads'));
+            batch.set(leadRef, {
+              ...lead,
+              status: 'New',
+              createdAt: serverTimestamp(),
+              source: 'Google Sheets Import'
+            });
+            console.log(`Preparing to import lead ${index + 1}:`, lead.firstName, lead.lastName);
+          });
+
+          try {
+            await batch.commit();
+            console.log('Successfully imported', newLeads.length, 'leads');
+          } catch (batchError) {
+            console.error('Batch commit failed:', batchError);
+            throw new Error('Failed to write to Firestore: ' + batchError.message);
+          }
+        } else {
+          console.log('No new leads to import');
+        }
+
+      } catch (fetchError) {
+        console.error('Fetch/processing error:', {
+          error: fetchError,
+          response: response ? {
+            status: response.status,
+            statusText: response.statusText,
+            url: response.url
+          } : 'No response received'
+        });
         
-      } else {
-        console.log('skipping google sheets fetch - not initial load');
+        // User-friendly error notification
+        setOperationMessage({
+          show: true,
+          text: 'Failed to sync with Google Sheets. Please check console for details.',
+          isError: true
+        });
       }
     } catch (outerError) {
-      console.error('unexpected error in leads processing:', outerError);
-      alert('an unexpected error occurred. please try again later.');
+      console.error('Unexpected error in leads processing:', outerError);
+      setOperationMessage({
+        show: true,
+        text: 'An unexpected error occurred during Google Sheets sync.',
+        isError: true
+      });
     }
   });
 
   unsubscribers.push(leadsUnsub);
 
+  // Keep your existing listeners for customers, properties, jobs, routing
   const customersUnsub = onSnapshot(collection(db, 'customers'), (snapshot) => {
-  setCustomers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-});
+    setCustomers(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+  });
   unsubscribers.push(customersUnsub);
 
   const propertiesUnsub = onSnapshot(collection(db, 'properties'), (snapshot) => {
-    setProperties(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    console.log('=== PROPERTIES SNAPSHOT DEBUG ===');
+    console.log('snapshot size:', snapshot.size);
+    console.log('snapshot empty:', snapshot.empty);
+    
+    const propertiesData = snapshot.docs.map(doc => {
+      const data = { id: doc.id, ...doc.data() };
+      console.log('property doc:', data);
+      return data;
+    });
+    
+    console.log('final properties array:', propertiesData);
+    setProperties(propertiesData);
   });
   unsubscribers.push(propertiesUnsub);
 
@@ -766,7 +1031,6 @@ useEffect(() => {
   return () => {
     unsubscribers.forEach(unsub => unsub());
   };
-
 }, []);
 
 const handleJobUpdate = async (updatedJob, scope) => {
@@ -867,6 +1131,64 @@ const handleJobUpdate = async (updatedJob, scope) => {
   }
 };
 
+const handleCustomerUpdate = async (updatedCustomer) => {
+  try {
+    await updateDoc(doc(db, 'customers', updatedCustomer.customerId), {
+      firstName: updatedCustomer.firstName,
+      lastName: updatedCustomer.lastName,
+      phoneNumber: updatedCustomer.phoneNumber,
+      email: updatedCustomer.email,
+      lastUpdated: serverTimestamp()
+    });
+
+    setOperationMessage({
+      show: true,
+      text: 'customer updated successfully!',
+      isError: false
+    });
+    return true;
+  } catch (error) {
+    console.error('error updating customer:', error);
+    setOperationMessage({
+      show: true,
+      text: `failed to update customer: ${error.message}`,
+      isError: true
+    });
+    return false;
+  }
+};
+
+const handlePropertyUpdate = async (updatedProperty) => {
+  try {
+    await updateDoc(doc(db, 'properties', updatedProperty.propertyId), {
+      serviceAddress: updatedProperty.serviceAddress,
+      rate: updatedProperty.rate,
+      propertySqft: updatedProperty.propertySqft,
+      serviceFrequency: updatedProperty.serviceFrequency,
+      nextServiceDate: updatedProperty.nextServiceDate,
+      sqftPerDollar: updatedProperty.propertySqft && updatedProperty.rate 
+        ? updatedProperty.propertySqft / updatedProperty.rate 
+        : 0,
+      lastUpdated: serverTimestamp()
+    });
+
+    setOperationMessage({
+      show: true,
+      text: 'property updated successfully!',
+      isError: false
+    });
+    return true;
+  } catch (error) {
+    console.error('error updating property:', error);
+    setOperationMessage({
+      show: true,
+      text: `failed to update property: ${error.message}`,
+      isError: true
+    });
+    return false;
+  }
+};
+
   // Helper functions
   const getNextCustomerId = () => {
     const nums = customers.map(c => parseInt(c.customerId.split('-')[1]) || 0);
@@ -953,6 +1275,7 @@ const convertLead = async (lead, jobData) => {
     const customerId = getNextCustomerId();
     const customerNumber = parseInt(customerId.split('-')[1]);
     
+    // 1. Create customer document
     const newCustomer = { 
       customerId, 
       firstName: lead.firstName || '', 
@@ -960,44 +1283,151 @@ const convertLead = async (lead, jobData) => {
       phoneNumber: lead.phoneNumber || '', 
       referral: 'Website Form', 
       email: lead.email || '',
-      createdAt: new Date().toISOString()
+      createdAt: serverTimestamp()
     };
     
-    await setDoc(doc(db, 'customers', customerId), newCustomer);
+    // 2. Create property document
+    const propertyId = getNextPropertyId(customerNumber);
+    const newProperty = {
+      propertyId,
+      customerNumber,
+      serviceAddress: jobData.serviceAddress || lead.address || '',
+      rate: parseFloat(jobData.rate) || 0,
+      propertySqft: parseFloat(jobData.propertySqft) || 0,
+      sqftPerDollar: jobData.rate && jobData.propertySqft 
+        ? parseFloat(jobData.propertySqft) / parseFloat(jobData.rate)
+        : 0,
+      nextServiceDate: jobData.scheduledDate,
+      serviceFrequency: jobData.serviceFrequency || 'Weekly',
+      active: true,
+      createdAt: serverTimestamp()
+    };
 
-    // Create initial job
-    const { seriesId, baseJobId } = await createSingleJob({
-      ...jobData,
+    // 3. Create job document
+    const jobId = getNextJobId();
+    const newJob = {
+      jobId,
       customerId,
-      serviceAddress: lead.address || ''
-    }, newCustomer, []);
+      properties: [propertyId], // Link to the property
+      serviceType: jobData.serviceType || 'Mowing',
+      scheduledDate: jobData.scheduledDate,
+      serviceFrequency: jobData.serviceFrequency || 'Weekly',
+      rate: parseFloat(jobData.rate) || 0,
+      manHours: jobData.manHours || 0,
+      notes: jobData.notes || '',
+      customerName: `${newCustomer.firstName} ${newCustomer.lastName}`.trim(),
+      serviceAddress: newProperty.serviceAddress,
+      status: 'Scheduled',
+      bidType: jobData.bidType || 'bid',
+      isRecurring: jobData.serviceFrequency !== 'One-Time' && jobData.serviceFrequency !== 'As-Needed',
+      seriesId: `series_${Date.now()}`,
+      baseJobId: jobId,
+      createdAt: serverTimestamp()
+    };
 
-    // Create future jobs if recurring
-    if (jobData.serviceFrequency !== 'One-Time' && jobData.serviceFrequency !== 'As-Needed') {
-      const jobsToCreate = jobData.serviceFrequency === 'Bi-Weekly' ? 3 : 1;
-      await createFutureJobs({
-        ...jobData,
-        customerId,
-        serviceAddress: lead.address || '',
-        seriesId,
-        baseJobId
-      }, newCustomer, [], 4);
-    }
+    // 4. Create routing document
+    const routingId = `${jobData.scheduledDate}-${customerNumber}`;
+    const newRouting = {
+      date: jobData.scheduledDate,
+      customerNumber,
+      customerNameFirst: newCustomer.firstName,
+      customerNameLast: newCustomer.lastName,
+      phoneNumber: newCustomer.phoneNumber,
+      serviceAddress: newProperty.serviceAddress,
+      nextServiceDate: getNextServiceDate(jobData.scheduledDate, jobData.serviceFrequency),
+      jobType: jobData.serviceType,
+      mowingBid: jobData.serviceType === 'Mowing' ? `${jobData.rate}` : '',
+      onSite: '',
+      offSite: '',
+      manHours: jobData.manHours || 0,
+      bidType: jobData.bidType || 'bid',
+      revenue: `${jobData.rate || 0}`,
+      dollarsPerManHour: jobData.manHours > 0 ? (jobData.rate || 0) / jobData.manHours : 0,
+      invoiceSent: 'No',
+      createdAt: serverTimestamp()
+    };
 
-    // Update lead status
+    // Write all documents to Firestore in a batch
+    const batch = writeBatch(db);
+    
+    // Add customer
+    batch.set(doc(db, 'customers', customerId), newCustomer);
+    
+    // Add property
+    batch.set(doc(db, 'properties', propertyId), newProperty);
+    console.log('=== CREATING PROPERTY ===');
+    console.log('propertyId:', propertyId);
+    console.log('newProperty data:', newProperty);
+    
+    // Add job
+    batch.set(doc(db, 'jobs', jobId), newJob);
+    
+    // Add routing
+    batch.set(doc(db, 'routing', routingId), newRouting);
+    
+    // Update lead status if it exists
     if (lead.id) {
-      await updateDoc(doc(db, 'leads', lead.id), { 
+      batch.update(doc(db, 'leads', lead.id), { 
         status: 'Converted',
-        convertedAt: new Date().toISOString(),
+        convertedAt: serverTimestamp(),
         convertedToCustomerId: customerId
       });
     }
 
+    // Commit the batch
+    await batch.commit();
+
+    // Create future jobs if recurring
+    // Create future jobs if recurring (create 4 total including the first one)
+if (newJob.isRecurring) {
+  let currentDate = jobData.scheduledDate;
+  const batch2 = writeBatch(db);
+  
+  for (let i = 0; i < 3; i++) { // create 3 more (4 total including initial)
+    const nextDate = getNextServiceDate(currentDate, jobData.serviceFrequency);
+    if (!nextDate) break;
+    
+    const customerNumber = parseInt(newCustomer.customerId.split('-')[1]);
+    const nextJobId = `J-${new Date().getFullYear()}-${Date.now()}-${Math.floor(Math.random() * 1000)}-${i}`;
+    const nextRoutingId = `${nextDate}-${customerNumber}`;
+
+    // Create job in batch
+    batch2.set(doc(db, 'jobs', nextJobId), {
+      ...newJob,
+      jobId: nextJobId,
+      scheduledDate: nextDate,
+      status: 'Scheduled',
+      createdAt: serverTimestamp()
+    });
+
+    // Create routing entry in batch  
+    batch2.set(doc(db, 'routing', nextRoutingId), {
+      ...newRouting,
+      date: nextDate,
+      createdAt: serverTimestamp()
+    });
+
+    currentDate = nextDate;
+  }
+  
+  await batch2.commit();
+}
+
     setModalOpen(false);
     setSelectedLead(null);
+    
+    setOperationMessage({
+      show: true,
+      text: 'Successfully converted lead to customer!',
+      isError: false
+    });
   } catch (error) {
     console.error('Error converting lead:', error);
-    alert('Error converting lead. Please try again.');
+    setOperationMessage({
+      show: true,
+      text: `Error converting lead: ${error.message}`,
+      isError: true
+    });
   }
 };
 
@@ -1523,10 +1953,10 @@ const timeChartData = {
           return uniqueJobs.map(job => (
             <div key={job.jobId} className="card job-card">
               <div>
-                <div className="job-card-title">{job.customerName}</div>
+                <div className="job-card-title">{job.serviceType}</div>
                 <div className="text-muted">{job.serviceAddress}</div>
                 <div className="text-muted job-card-details">
-                  {job.serviceType} • scheduled: {job.scheduledDate}
+                  {job.customerName} • scheduled: {job.scheduledDate}
                   {job.isRecurring && (
                     <span className="recurring-badge">
                       <RefreshCw className="icon-xs" /> {job.serviceFrequency}
@@ -1634,7 +2064,7 @@ const timeChartData = {
           {/* Customers Tab */}
           {activeTab === 'customers' && (
             <div className="tab-panel">
-              <h2 className="panel-title">customer management</h2>
+              <h2 className="panel-title">Customer Management</h2>
               {customers.length === 0 ? (
                 <div className="empty-state">no customers yet.</div>
               ) : (
@@ -1645,16 +2075,43 @@ const timeChartData = {
                     return (
                       <div key={customer.customerId} className="card customer-card">
                         <div className="customer-card-header">
-                          <div>
-                            <div className="customer-name">{customer.firstName} {customer.lastName}</div>
-                            <div className="customer-contact">
-                              <Phone className="icon-sm inline" />
-                              {customer.phoneNumber}
-                            </div>
-                            <div className="customer-contact">{customer.email}</div>
-                          </div>
-                          <div className="text-muted">ID: {customer.customerId}</div>
-                        </div>
+    <div>
+      <div className="customer-name">{customer.firstName} {customer.lastName}</div>
+      <div className="customer-contact">
+        <Phone className="icon-sm inline" />
+        {customer.phoneNumber}
+      </div>
+      <div className="customer-contact">{customer.email}</div>
+    </div>
+    <div className="card-menu-container">
+      <button 
+        className="card-menu"
+        onClick={(e) => {
+          e.stopPropagation();
+          setActiveMenu(activeMenu === customer.customerId ? null : customer.customerId);
+        }}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <circle cx="12" cy="12" r="1"/>
+          <circle cx="19" cy="12" r="1"/>
+          <circle cx="5" cy="12" r="1"/>
+        </svg>
+      </button>
+      
+      {activeMenu === customer.customerId && (
+        <div className="dropdown-menu">
+          <button onClick={() => {
+            setCustomerToEdit(customer);
+            setEditCustomerModalOpen(true);
+            setActiveMenu(null);
+          }}>
+            <Pencil size={16} />
+            edit customer
+          </button>
+        </div>
+      )}
+    </div>
+  </div>
                         {customerProps.length > 0 && (
                           <div className="customer-properties">
                             <div className="properties-title">properties:</div>
@@ -1727,13 +2184,35 @@ const timeChartData = {
         return (
           <div className="property-card" key={property.propertyId}>
             <div className={`status-indicator ${getStatusClass()}`}></div>
-            <button className="card-menu">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <circle cx="12" cy="12" r="1"/>
-                  <circle cx="19" cy="12" r="1"/>
-                  <circle cx="5" cy="12" r="1"/>
-                </svg>
-              </button>
+            
+            <div className="card-menu-container">
+  <button 
+    className="card-menu"
+    onClick={(e) => {
+      e.stopPropagation();
+      setActiveMenu(activeMenu === property.propertyId ? null : property.propertyId);
+    }}
+  >
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <circle cx="12" cy="12" r="1"/>
+      <circle cx="19" cy="12" r="1"/>
+      <circle cx="5" cy="12" r="1"/>
+    </svg>
+  </button>
+  
+  {activeMenu === property.propertyId && (
+    <div className="dropdown-menu">
+      <button onClick={() => {
+        setPropertyToEdit(property);
+        setEditPropertyModalOpen(true);
+        setActiveMenu(null);
+      }}>
+        <Pencil size={16} />
+        edit
+      </button>
+    </div>
+  )}
+</div>
 
             <div className="address-section card-header">
               <h3 className="address-text">{property.serviceAddress}</h3>
@@ -2015,6 +2494,26 @@ const timeChartData = {
         isError={operationMessage.isError}
         onClose={() => setOperationMessage({ show: false, text: '', isError: false })}
       />
+
+      <EditCustomerModal
+  isOpen={editCustomerModalOpen}
+  onClose={() => {
+    setEditCustomerModalOpen(false);
+    setCustomerToEdit(null);
+  }}
+  customer={customerToEdit}
+  onSave={handleCustomerUpdate}
+/>
+
+<EditPropertyModal
+  isOpen={editPropertyModalOpen}
+  onClose={() => {
+    setEditPropertyModalOpen(false);
+    setPropertyToEdit(null);
+  }}
+  property={propertyToEdit}
+  onSave={handlePropertyUpdate}
+/>
     </div>
   );
 };
