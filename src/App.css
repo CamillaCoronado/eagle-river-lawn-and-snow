@@ -277,12 +277,16 @@ body {
 .job-card-details { margin-top: 0.25rem; }
 .job-card-actions { display: flex; align-items: center; gap: 1rem; }
 
+.customer-card {
+  position: relative;
+}
+
 .customer-card-header { display: flex; justify-content: space-between; align-items: flex-start; }
 .customer-name { font-size: 1.125rem; line-height: 1.75rem; font-weight: 500; }
 .customer-contact { margin-top: 0.25rem; display: flex; align-items: center; gap: 0.25rem; color: #6B7280; }
 .customer-properties { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid #E5E7EB; }
 .properties-title { font-size: 0.875rem; font-weight: 500; color: #374151; margin-bottom: 0.5rem; }
-.property-item { font-size: 0.875rem; color: #4B5563; margin-left: 1rem; display: flex; align-items: center; gap: 0.25rem; }
+.property-item { font-size: 0.875rem; color: #4B5563; display: flex; align-items: center; gap: 0.25rem; }
 
 /* Analytics */
 .analytics-grid {
@@ -1170,7 +1174,8 @@ body {
   justify-content: space-between;
   align-items: flex-start;
   margin-bottom: 0.75rem;
-  padding-right: 1.5rem; /* space for status dot */
+  padding-right: 1.5rem;
+  flex-direction: column;
 }
 
 .service-address {
@@ -1187,6 +1192,7 @@ body {
   font-size: 0.875rem;
   font-weight: 600;
   box-shadow: 0 2px 4px rgba(102, 126, 234, 0.3);
+  margin-top: 16px;
 }
 
 /* Customer details */
@@ -1444,7 +1450,7 @@ body {
 .dropdown-menu {
   position: absolute;
   right: 0;
-  top: 20px;
+  top: 40px;
   background: white;
   border-radius: 6px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
@@ -1452,6 +1458,10 @@ body {
   min-width: 200px;
   overflow: hidden;
   border: 1px solid #eee;
+}
+
+.customer-card .dropdown-menu {
+  top: 20px;
 }
 
 .btn-primary svg,
