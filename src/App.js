@@ -886,7 +886,12 @@ useEffect(() => {
         address: doc.data().address || '',
         status: doc.data().status || 'New'
       }));
-      setLeads(leadsData);
+      setLeads(prevLeads => {
+        if (JSON.stringify(prevLeads) !== JSON.stringify(leadsData)) {
+          return leadsData;
+        }
+        return prevLeads;
+      });
 
       console.log('Attempting to fetch from Google Sheets...');
       
