@@ -161,7 +161,6 @@ const JobCreationModal = ({ isOpen, onClose, lead, onConfirm }) => {
                 <option value="Fall Fertilizer">Spring Fertilizer</option>
                 <option value="Fall Lime">Spring Lime</option>
                 <option value="Leaf Removal">Leaf removal</option>
-                <option value="Fall Cleanup">Fall cleanup</option>
                 <option value="Snow Removal">Snow removal</option>
                 <option value="Misc">Miscellaneous</option>
               </select>
@@ -382,12 +381,18 @@ const NewJobModal = ({
                 onChange={(e) => setJobData({...jobData, serviceType: e.target.value})}
                 className="form-select"
               >
+                <option value="First Time Mowing">First time Mowing</option>
+                <option value="Bag Haul">Bag Haul</option>
                 <option value="Mowing">Mowing</option>
-                <option value="Snow Removal">Snow Removal</option>
-                <option value="Leaf Removal">Leaf Removal</option>
-                <option value="Spring Cleanup">Spring Cleanup</option>
-                <option value="Fall Cleanup">Fall Cleanup</option>
-                <option value="Other">Other</option>
+                <option value="Spring Cleanup">Spring cleanup</option>
+                <option value="Spring Fertilizer">Spring Fertilizer</option>
+                <option value="Spring Lime">Spring Lime</option>
+                <option value="Summer Fertilizer">Summer Fertilizer</option>
+                <option value="Fall Fertilizer">Spring Fertilizer</option>
+                <option value="Fall Lime">Spring Lime</option>
+                <option value="Leaf Removal">Leaf removal</option>
+                <option value="Snow Removal">Snow removal</option>
+                <option value="Misc">Miscellaneous</option>
               </select>
             </div>
             <div>
@@ -551,7 +556,6 @@ const EditJobModal = ({
                 <option value="Fall Fertilizer">Spring Fertilizer</option>
                 <option value="Fall Lime">Spring Lime</option>
                 <option value="Leaf Removal">Leaf removal</option>
-                <option value="Fall Cleanup">Fall cleanup</option>
                 <option value="Snow Removal">Snow removal</option>
                 <option value="Misc">Miscellaneous</option>
               {/* Add other service types */}
@@ -1615,22 +1619,22 @@ if (field === 'invoiceSent' && value === 'Yes') {
     parseInt(j.customerId.split('-')[1]) === route.customerNumber
   );
   
-  if (job?.isRecurring) {
+  if (job) {
     try {
-      // 1. Mark current job complete
+      // Mark current job complete (for ALL jobs, not just recurring)
       await updateDoc(doc(db, 'jobs', job.jobId), {
         status: 'Complete',
         completedAt: new Date().toISOString()
       });
 
-      // 2. Immediately create next instance
-      const nextDate = getNextServiceDate(job.scheduledDate, job.serviceFrequency);
-      if (nextDate) {
-        await createRecurringJobInstance(job, nextDate, customers);
+      // Only create future jobs if it's recurring
+      if (job.isRecurring) {
+        const nextDate = getNextServiceDate(job.scheduledDate, job.serviceFrequency);
+        if (nextDate) {
+          await createRecurringJobInstance(job, nextDate, customers);
+        }
+        await maintainRecurringJobs(job, jobs, customers, getNextServiceDate, routing);
       }
-
-      // 3. Then maintain the full series
-      await maintainRecurringJobs(job, jobs, customers, getNextServiceDate, routing);
     } catch (error) {
       console.error('Error handling completion:', error);
     }
@@ -2300,7 +2304,7 @@ const timeChartData = {
               {filteredRouting.length === 0 ? (
                 <div className="empty-state">
                   <Map className="empty-state-icon" />
-                  <p>no routes scheduled for {new Date(selectedDate).toLocaleDateString()}.</p>
+                  <p>no routes scheduled for { selectedDate }.</p>
                   <p className="text-sm">Convert a lead or create a job to add to the route.</p>
                 </div>
               ) : (
