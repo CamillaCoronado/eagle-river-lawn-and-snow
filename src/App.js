@@ -941,12 +941,12 @@ useEffect(() => {
         // 3. Process new leads
         const existingLeadKeys = new Set(
           leadsData.map(lead => 
-            `${lead.firstName?.toLowerCase()}-${lead.lastName?.toLowerCase()}-${lead.phoneNumber?.toLowerCase()}`
+            `${lead.firstName?.toLowerCase()}-${lead.lastName?.toLowerCase()}-${lead.phoneNumber}`
           )
         );
 
         const newLeads = sheetLeads.filter(lead => {
-          const leadKey = `${lead.firstName?.toLowerCase()}-${lead.lastName?.toLowerCase()}-${lead.phoneNumber?.toLowerCase()}`;
+          const leadKey = `${lead.firstName?.toLowerCase()}-${lead.lastName?.toLowerCase()}-${lead.phoneNumber}`;
           return !existingLeadKeys.has(leadKey);
         });
 
