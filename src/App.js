@@ -4,10 +4,11 @@ import {
   collection, 
   doc, 
   setDoc, 
+  getDoc,
   onSnapshot,
   updateDoc,
   deleteDoc,
-  writeBatch,  // Add this
+  writeBatch,
   serverTimestamp 
 } from 'firebase/firestore';
 import React, { useState, useEffect, useMemo } from 'react';
@@ -24,22 +25,28 @@ ChartJS.register(...registerables);
 
 
 // Helper functions
-const formatCurrency = (value) => {
+export const formatCurrency = (value) => {
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
   }).format(value);
 };
 
+const jobIdFor = (seriesId, scheduledDate) => `J-${seriesId}-${scheduledDate}`;
+
 const createRecurringJobInstance = async (baseJob, nextDate, customers) => {
   const customerNumber = parseInt(baseJob.customerId.split('-')[1]);
   const customer = customers.find(c => c.customerId === baseJob.customerId);
-  
-  const nextJobId = `J-${new Date().getFullYear()}-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+  const nextJobId = jobIdFor(baseJob.seriesId, nextDate);
   const nextRoutingId = `${nextDate}-${customerNumber}`;
 
-  // Create job
-  await setDoc(doc(db, 'jobs', nextJobId), {
+  // If job already exists, do nothing (idempotent)
+  const jobRef = doc(db, 'jobs', nextJobId);
+  const existing = await getDoc(jobRef);
+  if (existing.exists()) return;
+
+  await setDoc(jobRef, {
     ...baseJob,
     jobId: nextJobId,
     scheduledDate: nextDate,
@@ -47,12 +54,12 @@ const createRecurringJobInstance = async (baseJob, nextDate, customers) => {
     createdAt: new Date().toISOString()
   });
 
-  // Create routing entry
+  // Routing is keyed by date+customer, so setDoc just overwrites/updates that single record safely.
   await setDoc(doc(db, 'routing', nextRoutingId), {
     date: nextDate,
     customerNumber,
-    customerNameFirst: customer.firstName,
-    customerNameLast: customer.lastName,
+    customerNameFirst: customer?.firstName || '',
+    customerNameLast: customer?.lastName || '',
     serviceAddress: baseJob.serviceAddress,
     jobType: baseJob.serviceType,
     revenue: baseJob.rate,
@@ -62,25 +69,45 @@ const createRecurringJobInstance = async (baseJob, nextDate, customers) => {
 };
 
 // add this function to automatically maintain 4 future jobs per series:
-const maintainRecurringJobs = async (baseJob, jobs, customers, getNextServiceDate, routing) => {
+// Safe + idempotent: keeps at most N future scheduled jobs per series
+const maintainRecurringJobs = async (baseJob, jobs, customers, getNextServiceDate) => {
+  if (!baseJob?.isRecurring) return;
+
+  // target number of FUTURE scheduled jobs to maintain
+  const targetCount = baseJob.serviceFrequency === 'Bi-Weekly' ? 6 : 4;
+
+  // work off live state
   const seriesJobs = jobs
     .filter(j => j.seriesId === baseJob.seriesId)
     .sort((a, b) => new Date(a.scheduledDate) - new Date(b.scheduledDate));
 
-  // For bi-weekly, we want more future jobs than weekly
-  const targetCount = baseJob.serviceFrequency === 'Bi-Weekly' ? 6 : 4;
-  
-  let currentDate = new Date(seriesJobs[seriesJobs.length - 1].scheduledDate);
-  
-  while (seriesJobs.filter(j => j.status === 'Scheduled').length < targetCount) {
-    const nextDate = getNextServiceDate(currentDate.toISOString().split('T')[0], 
-                                      baseJob.serviceFrequency);
+  if (seriesJobs.length === 0) return;
+
+  // count FUTURE scheduled jobs (strictly after "today" job) and build a date set to avoid dupes
+  const existingDates = new Set(seriesJobs.map(j => j.scheduledDate));
+  let scheduledFutureCount = seriesJobs.filter(j => j.status === 'Scheduled' && new Date(j.scheduledDate) > new Date()).length;
+
+  // start from the last known date in the series
+  let lastDate = new Date(seriesJobs[seriesJobs.length - 1].scheduledDate);
+
+  // hard safety to avoid runaway if something goes wrong
+  let safety = 24;
+
+  while (scheduledFutureCount < targetCount && safety-- > 0) {
+    const nextDate = getNextServiceDate(lastDate.toISOString().split('T')[0], baseJob.serviceFrequency);
     if (!nextDate) break;
-    
-    await createRecurringJobInstance(baseJob, nextDate, customers);
-    currentDate = new Date(nextDate);
+
+    // idempotency: skip if a job on this date already exists for the series
+    if (!existingDates.has(nextDate)) {
+      await createRecurringJobInstance(baseJob, nextDate, customers);
+      existingDates.add(nextDate);
+      scheduledFutureCount += 1;
+    }
+
+    lastDate = new Date(nextDate);
   }
 };
+
 
 // Modal Components
 const JobCreationModal = ({ isOpen, onClose, lead, onConfirm }) => {
@@ -1237,47 +1264,6 @@ const getNextServiceDate = (scheduledDate, serviceFrequency) => {
   return date.toISOString().split('T')[0];
 };
 
-const maintainJobSeries = async (completedJob, jobs, customers, routing) => {
-  if (!completedJob.isRecurring) return;
-
-  // Get all jobs in this series (sorted by date)
-  const seriesJobs = jobs
-    .filter(j => j.seriesId === completedJob.seriesId)
-    .sort((a, b) => new Date(a.scheduledDate) - new Date(b.scheduledDate));
-
-  // Always maintain 4 future jobs
-  const TARGET_FUTURE_JOBS = 4;
-  
-  // Count how many future jobs already exist
-  const existingFutureJobs = seriesJobs.filter(j => 
-    new Date(j.scheduledDate) > new Date(completedJob.scheduledDate)
-  ).length;
-
-  // Calculate how many new jobs we need to create
-  const jobsNeeded = TARGET_FUTURE_JOBS - existingFutureJobs;
-  
-  if (jobsNeeded > 0) {
-    const customer = customers.find(c => c.customerId === completedJob.customerId);
-    let lastDate = new Date(seriesJobs[seriesJobs.length - 1].scheduledDate);
-
-    for (let i = 0; i < jobsNeeded; i++) {
-      lastDate = new Date(getNextServiceDate(
-        lastDate.toISOString().split('T')[0], 
-        completedJob.serviceFrequency
-      ));
-      
-      if (!lastDate) break;
-
-      await createSingleJob({
-        ...completedJob,
-        scheduledDate: lastDate.toISOString().split('T')[0],
-        status: 'Pending'
-      }, customer, properties);
-    }
-  }
-};
-
-// Lead conversion
 
 const convertLead = async (lead, jobData) => {
   try {
@@ -1587,60 +1573,67 @@ const createJobForExistingCustomer = async (jobData) => {
 
   // Route editing
 const handleRouteUpdate = async (routeId, field, value) => {
+  // helper: parse "HH:MM" (or "HH:MM:SS") to minutes from midnight
+  const parseHHMM = (hhmm) => {
+    if (!hhmm) return null;
+    const parts = hhmm.split(':').map(Number);
+    if (parts.length < 2 || parts.some(Number.isNaN)) return null;
+    const [h, m] = parts;
+    return h * 60 + m;
+  };
+
   try {
     const route = routing.find(r => `${r.date}-${r.customerNumber}` === routeId);
     if (!route) return;
 
+    const prevValue = route[field];
     const updatedData = { [field]: value };
-    
-    // Recalculate manHours if time fields changed
-    if (field === 'onSite' || field === 'offSite') {
-      const onSiteTime = new Date(`1970-01-01T${field === 'onSite' ? value : route.onSite}`);
-      const offSiteTime = new Date(`1970-01-01T${field === 'offSite' ? value : route.offSite}`);
-      
-      if (!isNaN(onSiteTime) && !isNaN(offSiteTime) && offSiteTime > onSiteTime) {
-        const diffMs = offSiteTime - onSiteTime;
-        const manHours = diffMs / (1000 * 60 * 60);
-        updatedData.manHours = manHours;
-        
-        // Recalculate dollars per man hour
-        const revenue = parseFloat(route.revenue) || 0;
-        updatedData.dollarsPerManHour = manHours > 0 ? revenue / manHours : 0;
-      }
-    }
-    
-    // Update in Firestore
-    await updateDoc(doc(db, 'routing', routeId), updatedData);
-    
-    // Auto-generate future jobs when invoice is sent
-if (field === 'invoiceSent' && value === 'Yes') {
-  const job = jobs.find(j => 
-    j.scheduledDate === route.date && 
-    parseInt(j.customerId.split('-')[1]) === route.customerNumber
-  );
-  
-  if (job) {
-    try {
-      // Mark current job complete (for ALL jobs, not just recurring)
-      await updateDoc(doc(db, 'jobs', job.jobId), {
-        status: 'Complete',
-        completedAt: new Date().toISOString()
-      });
 
-      // Only create future jobs if it's recurring
-      if (job.isRecurring) {
-        const nextDate = getNextServiceDate(job.scheduledDate, job.serviceFrequency);
-        if (nextDate) {
-          await createRecurringJobInstance(job, nextDate, customers);
-        }
-        await maintainRecurringJobs(job, jobs, customers, getNextServiceDate, routing);
+    // Recalculate manHours when onSite/offSite change
+    if (field === 'onSite' || field === 'offSite') {
+      const onMin  = parseHHMM(field === 'onSite' ? value : route.onSite);
+      const offMin = parseHHMM(field === 'offSite' ? value : route.offSite);
+
+      if (onMin != null && offMin != null) {
+        let diffMin = offMin - onMin;
+        if (diffMin < 0) diffMin += 24 * 60; // overnight safety
+        const manHours = +(diffMin / 60).toFixed(2);
+
+        // revenue can be number or "$75" string
+        const revenueNum =
+          typeof route.revenue === 'number'
+            ? route.revenue
+            : parseFloat(String(route.revenue).replace(/[$,]/g, '')) || 0;
+
+        updatedData.manHours = manHours;
+        updatedData.dollarsPerManHour = manHours > 0 ? +(revenueNum / manHours).toFixed(2) : 0;
+      } else {
+        updatedData.manHours = 0;
+        updatedData.dollarsPerManHour = 0;
       }
-    } catch (error) {
-      console.error('Error handling completion:', error);
     }
-  }
-}
-    
+
+    // Persist the route changes first
+    await updateDoc(doc(db, 'routing', routeId), updatedData);
+
+    // If invoice goes from No -> Yes, mark job complete and maintain future jobs (once)
+    if (field === 'invoiceSent' && prevValue !== 'Yes' && value === 'Yes') {
+      const job = jobs.find(j =>
+        j.scheduledDate === route.date &&
+        parseInt(j.customerId.split('-')[1]) === route.customerNumber
+      );
+
+      if (job) {
+        await updateDoc(doc(db, 'jobs', job.jobId), {
+          status: 'Complete',
+          completedAt: new Date().toISOString()
+        });
+
+        if (job.isRecurring) {
+          await maintainRecurringJobs(job, jobs, customers, getNextServiceDate);
+        }
+      }
+    }
   } catch (error) {
     console.error('Error updating route:', error);
     setOperationMessage({
@@ -1652,88 +1645,88 @@ if (field === 'invoiceSent' && value === 'Yes') {
 };
 
   // Filter routing by selected date
-  const filteredRouting = useMemo(() => {
-    return routing.filter(route => route.date === selectedDate);
-  }, [routing, selectedDate]);
+const filteredRouting = useMemo(() => {
+  return routing.filter(route => route.date === selectedDate);
+}, [routing, selectedDate]);
 
-  // Analytics
-  const analytics = useMemo(() => {
-    const completedJobs = routing.filter(r => r.invoiceSent === 'Yes');
-    const totalRevenue = completedJobs.reduce((sum, job) => sum + (parseFloat(job.revenue?.replace(/[$,]/g, '') || 0)), 0);
-    const totalHours = completedJobs.reduce((sum, job) => sum + (parseFloat(job.manHours) || 0), 0);
-    const avgDollarPerHour = totalHours > 0 ? totalRevenue / totalHours : 0;
+// Analytics
+const analytics = useMemo(() => {
+  const completedJobs = routing.filter(r => r.invoiceSent === 'Yes');
+  const totalRevenue = completedJobs.reduce((sum, job) => sum + (parseFloat(job.revenue?.replace(/[$,]/g, '') || 0)), 0);
+  const totalHours = completedJobs.reduce((sum, job) => sum + (parseFloat(job.manHours) || 0), 0);
+  const avgDollarPerHour = totalHours > 0 ? totalRevenue / totalHours : 0;
+  
+  // Group by month for time-based analysis
+  const monthlyData = {};
+  completedJobs.forEach(job => {
+    const date = new Date(job.date);
+    const monthYear = `${date.toLocaleString('default', { month: 'short' })} ${date.getFullYear()}`;
     
-    // Group by month for time-based analysis
-    const monthlyData = {};
-    completedJobs.forEach(job => {
-      const date = new Date(job.date);
-      const monthYear = `${date.toLocaleString('default', { month: 'short' })} ${date.getFullYear()}`;
-      
-      if (!monthlyData[monthYear]) {
-        monthlyData[monthYear] = {
-          revenue: 0,
-          hours: 0,
-          jobs: []
-        };
-      }
-      
-      const revenue = parseFloat(job.revenue?.replace(/[$,]/g, '') || 0);
-      const hours = parseFloat(job.manHours) || 0;
-      
-      monthlyData[monthYear].revenue += revenue;
-      monthlyData[monthYear].hours += hours;
-      monthlyData[monthYear].jobs.push({
-        revenue,
-        hours,
-        dollarsPerHour: hours > 0 ? revenue / hours : 0
-      });
+    if (!monthlyData[monthYear]) {
+      monthlyData[monthYear] = {
+        revenue: 0,
+        hours: 0,
+        jobs: []
+      };
+    }
+    
+    const revenue = parseFloat(job.revenue?.replace(/[$,]/g, '') || 0);
+    const hours = parseFloat(job.manHours) || 0;
+    
+    monthlyData[monthYear].revenue += revenue;
+    monthlyData[monthYear].hours += hours;
+    monthlyData[monthYear].jobs.push({
+      revenue,
+      hours,
+      dollarsPerHour: hours > 0 ? revenue / hours : 0
     });
+  });
 
-    // Sort months chronologically
-    const sortedMonths = Object.keys(monthlyData).sort((a, b) => {
-      return new Date(a) - new Date(b);
-    });
+  // Sort months chronologically
+  const sortedMonths = Object.keys(monthlyData).sort((a, b) => {
+    return new Date(a) - new Date(b);
+  });
 
 const timeChartData = {
-  labels: sortedMonths,
-  datasets: [
-    {
-      label: 'Revenue ($)',
-      data: sortedMonths.map(month => monthlyData[month].revenue),
-      borderColor: 'rgba(54, 162, 235, 1)',
-      backgroundColor: 'rgba(54, 162, 235, 0.1)',
-      borderWidth: 2,
-      tension: 0.3,
-      fill: true,
-      yAxisID: 'y'
-    },
-    {
-      label: 'Dollars per Man Hour ($)',
-      data: sortedMonths.map(month => {
-        const monthJobs = monthlyData[month].jobs;
-        const total = monthJobs.reduce((sum, job) => sum + job.dollarsPerHour, 0);
-        return monthJobs.length > 0 ? total / monthJobs.length : 0;
-      }),
-      borderColor: 'rgba(255, 99, 132, 1)',
-      backgroundColor: 'rgba(255, 99, 132, 0.1)',
-      borderWidth: 2,
-      tension: 0.3,
-      fill: true,
-      yAxisID: 'y1'
-    }
-  ]
+labels: sortedMonths,
+datasets: [
+  {
+    label: 'Revenue ($)',
+    data: sortedMonths.map(month => monthlyData[month].revenue),
+    borderColor: 'rgba(54, 162, 235, 1)',
+    backgroundColor: 'rgba(54, 162, 235, 0.1)',
+    borderWidth: 2,
+    tension: 0.3,
+    fill: true,
+    yAxisID: 'y'
+  },
+  {
+    label: 'Dollars per Man Hour ($)',
+    data: sortedMonths.map(month => {
+      const monthJobs = monthlyData[month].jobs;
+      const total = monthJobs.reduce((sum, job) => sum + job.dollarsPerHour, 0);
+      return monthJobs.length > 0 ? total / monthJobs.length : 0;
+    }),
+    borderColor: 'rgba(255, 99, 132, 1)',
+    backgroundColor: 'rgba(255, 99, 132, 0.1)',
+    borderWidth: 2,
+    tension: 0.3,
+    fill: true,
+    yAxisID: 'y1'
+  }
+]
 };
 
-    return { 
-      totalRevenue, 
-      totalHours, 
-      avgDollarPerHour, 
-      activeCustomers: customers.length, 
-      pendingLeads: leads.filter(l => l.status === 'New').length, 
-      scheduledJobs: jobs.filter(j => j.status === 'Scheduled').length,
-      timeChartData
-    };
-  }, [routing, customers, leads, jobs]);
+  return { 
+    totalRevenue, 
+    totalHours, 
+    avgDollarPerHour, 
+    activeCustomers: customers.length, 
+    pendingLeads: leads.filter(l => l.status === 'New').length, 
+    scheduledJobs: jobs.filter(j => j.status === 'Scheduled').length,
+    timeChartData
+  };
+}, [routing, customers, leads, jobs]);
 
   const timeChartOptions = {
     responsive: true,
