@@ -45,6 +45,8 @@ const createRecurringJobInstance = async (baseJob, nextDate, customers) => {
   const jobRef = doc(db, 'jobs', nextJobId);
   const existing = await getDoc(jobRef);
   if (existing.exists()) return;
+  if (baseJob?.seriesStatus === 'paused' || baseJob?.isPaused) return;
+
 
   // ✅ reuse normalized rate from baseJob
   const finalRate = baseJob.bidType === 'hourly'
@@ -85,6 +87,8 @@ const createRecurringJobInstance = async (baseJob, nextDate, customers) => {
 // Safe + idempotent: keeps at most N future scheduled jobs per series
 const maintainRecurringJobs = async (baseJob, jobs, customers, getNextServiceDate) => {
   if (!baseJob?.isRecurring) return;
+  if (baseJob?.seriesStatus === 'paused' || baseJob?.isPaused) return;
+
 
   // target number of FUTURE scheduled jobs to maintain
   const targetCount = baseJob.serviceFrequency === 'Bi-Weekly' ? 4 : 4;
@@ -1422,6 +1426,43 @@ const handleJobUpdate = async (updatedJob, scope) => {
   }
 };
 
+const pauseSeries = async (seriesId) => {
+  try {
+    const baseJob = jobs.find(j => j.seriesId === seriesId && j.jobId === j.baseJobId);
+    if (!baseJob) {
+      setOperationMessage({ show: true, text: 'series base job not found', isError: true });
+      return;
+    }
+    await updateDoc(doc(db, 'jobs', baseJob.id), {
+      seriesStatus: 'paused',
+      lastUpdated: serverTimestamp()
+    });
+    setOperationMessage({ show: true, text: 'series paused', isError: false });
+  } catch (e) {
+    setOperationMessage({ show: true, text: `failed to pause: ${e.message}`, isError: true });
+  }
+};
+
+const resumeSeries = async (seriesId) => {
+  try {
+    const baseJob = jobs.find(j => j.seriesId === seriesId && j.jobId === j.baseJobId);
+    if (!baseJob) {
+      setOperationMessage({ show: true, text: 'series base job not found', isError: true });
+      return;
+    }
+    await updateDoc(doc(db, 'jobs', baseJob.id), {
+      seriesStatus: 'active',
+      lastUpdated: serverTimestamp()
+    });
+    // opportunistically fill futures
+    await maintainRecurringJobs(baseJob, jobs, customers, getNextServiceDate);
+    setOperationMessage({ show: true, text: 'series resumed', isError: false });
+  } catch (e) {
+    setOperationMessage({ show: true, text: `failed to resume: ${e.message}`, isError: true });
+  }
+};
+
+
 const handleCustomerUpdate = async (updatedCustomer) => {
   try {
     await updateDoc(doc(db, 'customers', updatedCustomer.customerId), {
@@ -1616,6 +1657,7 @@ const convertLead = async (lead, jobData) => {
       status: 'Scheduled',
       bidType: jobData.bidType || 'bid',
       isRecurring: jobData.serviceFrequency !== 'One-Time' && jobData.serviceFrequency !== 'As-Needed',
+      seriesStatus: 'active',
       seriesId: `series_${Date.now()}`,
       baseJobId: jobId,
       createdAt: serverTimestamp()
@@ -1762,6 +1804,7 @@ const createSingleJob = async (jobData, customer, properties) => {
     bidType: jobData.bidType || 'bid',
     createdAt: new Date().toISOString(),
     isRecurring: jobData.serviceFrequency !== 'One-Time' && jobData.serviceFrequency !== 'As-Needed',
+    seriesStatus: 'active',
     seriesId: jobData.seriesId || `series_${Date.now()}`,
     baseJobId: jobData.baseJobId || jobId
   };
@@ -1922,6 +1965,7 @@ const handleRouteUpdate = async (routeId, field, value) => {
 
     // Mark complete + spawn future jobs when invoiced
     if (field === 'invoiceSent' && value === 'Yes' && job) {
+      const paused = job.seriesStatus === 'paused' || job.isPaused;
       const actualRevenue =
         updatedData.revenue !== undefined
           ? Number(updatedData.revenue)
@@ -1933,7 +1977,7 @@ const handleRouteUpdate = async (routeId, field, value) => {
         actualRate: actualRevenue
       });
 
-      if (job.isRecurring) {
+      if (job.isRecurring && !paused) {
         const nextDate = getNextServiceDate(job.scheduledDate, job.serviceFrequency);
         if (nextDate) await createRecurringJobInstance(job, nextDate, customers);
         await maintainRecurringJobs(job, jobs, customers, getNextServiceDate, routing);
@@ -2288,6 +2332,13 @@ const timeChartData = {
                     <span className="recurring-badge">
                       <RefreshCw className="icon-xs" /> {job.serviceFrequency}
                     </span>
+                    
+                  )}
+
+                  {job.isRecurring && job.seriesStatus === 'paused' && (
+                    <span className="recurring-badge paused">
+                      PAUSED
+                    </span>
                   )}
                 </div>
               </div>
@@ -2377,6 +2428,26 @@ const timeChartData = {
                             </svg>
                             Delete Entire Series
                           </button>
+                          <div className="menu-divider"></div>
+
+                          {job.seriesStatus === 'paused' ? (
+                            <button onClick={async () => {
+                              await resumeSeries(job.seriesId);
+                              setActiveMenu(null);
+                            }}>
+                              <RefreshCw size={16} />
+                              resume series
+                            </button>
+                          ) : (
+                            <button onClick={async () => {
+                              await pauseSeries(job.seriesId);
+                              setActiveMenu(null);
+                            }}>
+                              <RefreshCw size={16} />
+                              pause series
+                            </button>
+                          )}
+
                         </>
                       )}
                     </div>
