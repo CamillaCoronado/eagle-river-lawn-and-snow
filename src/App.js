@@ -3,8 +3,8 @@ import { db } from './firebaseConfig';
 import { 
   collection, 
   doc, 
-  setDoc, 
-  getDoc,
+  setDoc,
+  getDoc, 
   onSnapshot,
   updateDoc,
   deleteDoc,
@@ -12,14 +12,15 @@ import {
   serverTimestamp 
 } from 'firebase/firestore';
 import React, { useState, useEffect, useMemo } from 'react';
-import { Calendar, Users, TrendingUp, Map, Inbox, ChevronRight, Phone, DollarSign, Clock, Home, Plus, Layers } from 'lucide-react';
+import { Calendar, Users, TrendingUp, Map as MapIcon, Inbox, ChevronRight, Phone, DollarSign, Clock, Home, Plus, Layers } from 'lucide-react';
 import { Chart as ChartJS, registerables } from 'chart.js';
 import { Line } from 'react-chartjs-2'; 
 import './App.css';
 import { 
-  Pencil, Trash2, RefreshCw, List, Edit2, ChevronDown, X 
+  Pencil, Trash2, RefreshCw, List, Edit2, ChevronDown, 
 } from 'lucide-react';
 import { CheckCircle, AlertCircle } from 'lucide-react';
+import { X as CloseIcon } from 'lucide-react';
 
 ChartJS.register(...registerables);
 
@@ -39,34 +40,46 @@ const createRecurringJobInstance = async (baseJob, nextDate, customers) => {
   const customer = customers.find(c => c.customerId === baseJob.customerId);
 
   const nextJobId = jobIdFor(baseJob.seriesId, nextDate);
-  const nextRoutingId = `${nextDate}-${customerNumber}`;
+  const nextRoutingId = `${nextDate}-${customerNumber}-${nextJobId}`;
 
-  // If job already exists, do nothing (idempotent)
   const jobRef = doc(db, 'jobs', nextJobId);
   const existing = await getDoc(jobRef);
   if (existing.exists()) return;
+
+  // ✅ reuse normalized rate from baseJob
+  const finalRate = baseJob.bidType === 'hourly'
+    ? (baseJob.hourlyRate || 0) * (baseJob.manHours || 0)
+    : (baseJob.rate || baseJob.estimatedRate || 0);
 
   await setDoc(jobRef, {
     ...baseJob,
     jobId: nextJobId,
     scheduledDate: nextDate,
+    rate: finalRate,
+    estimatedRate: finalRate,
     status: 'Scheduled',
     createdAt: new Date().toISOString()
   });
 
-  // Routing is keyed by date+customer, so setDoc just overwrites/updates that single record safely.
   await setDoc(doc(db, 'routing', nextRoutingId), {
+    id: nextRoutingId,
+    jobId: nextJobId,
     date: nextDate,
     customerNumber,
     customerNameFirst: customer?.firstName || '',
     customerNameLast: customer?.lastName || '',
     serviceAddress: baseJob.serviceAddress,
     jobType: baseJob.serviceType,
-    revenue: baseJob.rate,
+    revenue: finalRate,
+    estimatedRevenue: finalRate,
+    manHours: baseJob.manHours || 0,
+    bidType: baseJob.bidType,
+    dollarsPerManHour: baseJob.manHours > 0 ? finalRate / baseJob.manHours : 0,
     invoiceSent: 'No',
     createdAt: new Date().toISOString()
   });
 };
+
 
 // add this function to automatically maintain 4 future jobs per series:
 // Safe + idempotent: keeps at most N future scheduled jobs per series
@@ -74,7 +87,7 @@ const maintainRecurringJobs = async (baseJob, jobs, customers, getNextServiceDat
   if (!baseJob?.isRecurring) return;
 
   // target number of FUTURE scheduled jobs to maintain
-  const targetCount = baseJob.serviceFrequency === 'Bi-Weekly' ? 6 : 4;
+  const targetCount = baseJob.serviceFrequency === 'Bi-Weekly' ? 4 : 4;
 
   // work off live state
   const seriesJobs = jobs
@@ -112,17 +125,18 @@ const maintainRecurringJobs = async (baseJob, jobs, customers, getNextServiceDat
 // Modal Components
 const JobCreationModal = ({ isOpen, onClose, lead, onConfirm }) => {
   const [jobData, setJobData] = useState({
-    serviceType: 'Mowing',
-    bidType: 'bid',
-    rate: '',
-    hourlyRate: '75',
-    estimatedHours: '1',
-    propertySqft: '',
-    scheduledDate: new Date().toISOString().split('T')[0],
-    serviceFrequency: 'Weekly',
-    serviceAddress: lead?.address || '',
-    notes: ''
-  });
+  serviceType: 'Mowing',
+  bidType: 'bid',
+  estimatedRate: 0, // just use default values
+  actualRate: null,
+  hourlyRate: 75, // or whatever your default should be
+  estimatedHours: '1',
+  propertySqft: '',
+  scheduledDate: new Date().toISOString().split('T')[0],
+  serviceFrequency: 'Weekly',
+  serviceAddress: '',
+  notes: ''
+});
 
   const currentRate = useMemo(() => {
     const rateAsNumber = parseFloat(jobData.rate);
@@ -159,7 +173,12 @@ const JobCreationModal = ({ isOpen, onClose, lead, onConfirm }) => {
       ? hourlyRateAsNumber * estimatedHoursAsNumber
       : rateAsNumber;
     const manHours = jobData.bidType === 'hourly' ? estimatedHoursAsNumber : 0;
-    onConfirm({ ...jobData, rate: finalRate, manHours: manHours });
+    onConfirm({ 
+  ...jobData, 
+  estimatedRate: finalRate,
+  hourlyRate: jobData.bidType === 'hourly' ? parseFloat(jobData.hourlyRate) : null,
+  manHours: manHours 
+});
     setJobData({ serviceType: 'Mowing', bidType: 'bid', rate: '', hourlyRate: '75', estimatedHours: '1', propertySqft: '', scheduledDate: new Date().toISOString().split('T')[0], serviceFrequency: 'Weekly', serviceAddress: '', notes: '' });
   };
 
@@ -543,16 +562,25 @@ const EditJobModal = ({
 
   if (!isOpen) return null;
 
-  const handleSubmit = async (e) => {
+const handleSubmit = async (e) => {
   e.preventDefault();
-  const success = await onSave(editedJob, editScope);
-  if (success) {
-    onClose();
-  }
+
+  const bidType = (editedJob?.bidType || 'bid').toLowerCase();
+  const normalized = {
+    ...editedJob,
+    rate: bidType === 'hourly'
+      ? Number(editedJob?.hourlyRate || 0) * Number(editedJob?.manHours || 0)
+      : Number(editedJob?.rate || 0),
+    hourlyRate: bidType === 'hourly' ? Number(editedJob?.hourlyRate || 0) : null,
+    manHours: Number(editedJob?.manHours || 0),
+  };
+
+  const success = await onSave(normalized, editScope);
+  if (success) onClose();
 };
 
   return (
-    <div className="modal-overlay">
+    <div className="modal-overlay job-modal">
       <div className="modal-content">
         <div className="modal-header">
           <h2>{isRecurring && editScope === 'series' ? 'Edit Job Series' : 'Edit Job'}</h2>
@@ -567,27 +595,63 @@ const EditJobModal = ({
           )}
           
           <div className="form-group">
-            <label>Service Type</label>
+            <label>Pricing Type</label>
             <select
-              value={editedJob?.serviceType || ''}
-              onChange={(e) => setEditedJob({...editedJob, serviceType: e.target.value})}
+              value={(editedJob?.bidType || 'bid')}
+              onChange={(e) => {
+                const bidType = e.target.value;
+                setEditedJob(prev => ({
+                  ...prev,
+                  bidType,
+                  // keep previous values; no implicit recalcs here
+                }));
+              }}
               className="form-select"
             >
-               <option value="First Time Mowing">First time Mowing</option>
-                <option value="Bag Haul">Bag Haul</option>
-                <option value="Mowing">Mowing</option>
-                <option value="Spring Cleanup">Spring cleanup</option>
-                <option value="Spring Fertilizer">Spring Fertilizer</option>
-                <option value="Spring Lime">Spring Lime</option>
-                <option value="Summer Fertilizer">Summer Fertilizer</option>
-                <option value="Fall Fertilizer">Spring Fertilizer</option>
-                <option value="Fall Lime">Spring Lime</option>
-                <option value="Leaf Removal">Leaf removal</option>
-                <option value="Snow Removal">Snow removal</option>
-                <option value="Misc">Miscellaneous</option>
-              {/* Add other service types */}
+              <option value="bid">Bid</option>
+              <option value="hourly">Hourly</option>
             </select>
           </div>
+
+          {(editedJob?.bidType || 'bid') === 'bid' ? (
+  <div className="form-group">
+    <label>Flat Rate ($)</label>
+    <input
+      type="number"
+      step="0.01"
+      value={editedJob?.rate ?? 0}
+      onChange={(e) => setEditedJob({...editedJob, rate: e.target.value })}
+      className="form-input"
+    />
+  </div>
+) : (
+  <>
+    <div className="form-group">
+      <label>Hourly Rate ($)</label>
+      <input
+        type="number"
+        step="0.01"
+        value={editedJob?.hourlyRate ?? 0}
+        onChange={(e) => setEditedJob({...editedJob, hourlyRate: e.target.value })}
+        className="form-input"
+      />
+    </div>
+    <div className="form-group">
+      <label>Man Hours</label>
+      <input
+        type="number"
+        step="0.1"
+        value={editedJob?.manHours ?? 0}
+        onChange={(e) => setEditedJob({...editedJob, manHours: e.target.value })}
+        className="form-input"
+      />
+    </div>
+    <div className="form-display-field">
+      total (preview): {formatCurrency(((Number(editedJob?.hourlyRate)||0) * (Number(editedJob?.manHours)||0)))}
+    </div>
+  </>
+)}
+
           
           <div className="form-group">
             <label>Scheduled Date</label>
@@ -595,17 +659,6 @@ const EditJobModal = ({
               type="date"
               value={editedJob?.scheduledDate || ''}
               onChange={(e) => setEditedJob({...editedJob, scheduledDate: e.target.value})}
-              className="form-input"
-            />
-          </div>
-          
-          <div className="form-group">
-            <label>Rate ($)</label>
-            <input
-              type="number"
-              step="0.01"
-              value={editedJob?.rate || ''}
-              onChange={(e) => setEditedJob({...editedJob, rate: e.target.value})}
               className="form-input"
             />
           </div>
@@ -665,9 +718,9 @@ const OperationMessageModal = ({ isOpen, message, isError, onClose }) => {
             <CheckCircle size={24} />
           )}
           <h3>{isError ? 'Error' : 'Success'}</h3>
-          <button onClick={onClose} className="modal-close">
-            <X size={20} />
-          </button>
+          <button className="modal-close" onClick={onClose} type="button">
+           <CloseIcon size={18} />
+         </button>
         </div>
         <div className="message-body">
           <p>{message}</p>
@@ -873,8 +926,207 @@ const EditPropertyModal = ({ isOpen, onClose, property, onSave }) => {
   );
 };
 
-// Main Dashboard Component
+const SeriesViewModal = ({
+  isOpen,
+  onClose,
+  seriesId,
+  jobs,
+  routing,
+  onEditJob,
+  onEditSeries,
+  onDeleteJob,
+}) => {
+  if (!isOpen || !seriesId) return null;
+
+  const seriesJobs = jobs
+    .filter((j) => j.seriesId === seriesId)
+    .sort((a, b) => new Date(a.scheduledDate) - new Date(b.scheduledDate));
+
+  const routeByJobId = new Map(routing.map((r) => [r.jobId, r]));
+  const base = seriesJobs[0];
+  const nextUpcoming =
+    seriesJobs.find((j) => new Date(j.scheduledDate) >= new Date()) || seriesJobs[0];
+
+  const totalPlanned = seriesJobs.length;
+  const avgRate =
+    totalPlanned > 0
+      ? seriesJobs.reduce((sum, j) => sum + Number(j.rate || j.estimatedRate || 0), 0) /
+        totalPlanned
+      : 0;
+
+  const friendlyDate = (d) => d || '—';
+
+  return (
+    <div className="modal-overlay series-view">
+      <div className="modal-content wide">
+        {/* Header */}
+        <div className="modal-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <h2 style={{ margin: 0 }}>Job Series</h2>
+            <span
+              style={{
+                fontSize: 12,
+                padding: '4px 8px',
+                borderRadius: 999,
+                background: 'var(--chip-bg, #f3f4f6)',
+                color: 'var(--chip-fg, #374151)',
+              }}
+            >
+              {seriesId}
+            </span>
+          </div>
+          <button className="modal-close" onClick={onClose} type="button" aria-label="Close">
+            <CloseIcon size={18} />
+          </button>
+        </div>
+
+        {/* Summary strip */}
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
+            gap: 12,
+            padding: '12px 0 4px',
+          }}
+        >
+          <div className="stat-row" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Calendar size={16} />
+            <div>
+              <div className="text-muted" style={{ fontSize: 12 }}>
+                next service
+              </div>
+              <div style={{ fontWeight: 600 }}>
+                {friendlyDate(nextUpcoming?.scheduledDate)}
+              </div>
+            </div>
+          </div>
+          <div className="stat-row" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Clock size={16} />
+            <div>
+              <div className="text-muted" style={{ fontSize: 12 }}>
+                total occurrences
+              </div>
+              <div style={{ fontWeight: 600 }}>{totalPlanned}</div>
+            </div>
+          </div>
+          <div className="stat-row" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <DollarSign size={16} />
+            <div>
+              <div className="text-muted" style={{ fontSize: 12 }}>
+                avg rate
+              </div>
+              <div style={{ fontWeight: 600 }}>{formatCurrency(avgRate || 0)}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Table */}
+        {seriesJobs.length === 0 ? (
+          <div className="empty-state" style={{ marginTop: 16 }}>
+            No jobs in this series yet.
+          </div>
+        ) : (
+          <div className="table-container" style={{ marginTop: 12 }}>
+            <div className="table-header">
+              <div className="header-cell">date</div>
+              <div className="header-cell">type</div>
+              <div className="header-cell">pricing</div>
+              <div className="header-cell">rate</div>
+              <div className="header-cell">man hrs</div>
+              <div className="header-cell">status</div>
+              <div className="header-cell">route rev</div>
+              <div className="header-cell">actions</div>
+            </div>
+
+            {seriesJobs.map((j) => {
+              const r = routeByJobId.get(j.jobId);
+              const rateNum = Number(j.rate || j.estimatedRate || 0);
+              const revNum = Number(r?.revenue ?? r?.estimatedRevenue ?? 0);
+
+              return (
+                <div className="table-row" key={j.jobId}>
+                  <div className="grid-cell mono">{j.scheduledDate}</div>
+                  <div className="grid-cell">{j.serviceType}</div>
+                  <div className="grid-cell">
+                    <span
+                      className="status-badge"
+                      style={{
+                        textTransform: 'capitalize',
+                        background: 'var(--chip-bg, #f3f4f6)',
+                        color: 'var(--chip-fg, #374151)',
+                      }}
+                    >
+                      {j.bidType || 'bid'}
+                    </span>
+                    {j.isRecurring && (
+                      <span
+                        className="status-badge"
+                        style={{ marginLeft: 8, gap: 6, display: 'inline-flex', alignItems: 'center' }}
+                      >
+                        <RefreshCw size={14} />
+                        {j.serviceFrequency}
+                      </span>
+                    )}
+                  </div>
+                  <div className="grid-cell">{formatCurrency(rateNum)}</div>
+                  <div className="grid-cell">{Number(j.manHours || 0).toFixed(1)}</div>
+                  <div className="grid-cell">
+                    <span
+                      className={`status-badge status-${(j.status || 'Scheduled')
+                        .toLowerCase()
+                        .replace(' ', '-')}`}
+                    >
+                      {j.status || 'Scheduled'}
+                    </span>
+                  </div>
+                  <div className="grid-cell">{r ? formatCurrency(revNum) : '—'}</div>
+
+                  <div className="grid-cell actions">
+                    <button
+                      className="action-link"
+                      title="Edit this job"
+                      onClick={() => onEditJob(j)}
+                    >
+                      <Pencil size={14} />
+                      Edit
+                    </button>
+                    <button
+                      className="action-link"
+                      title="Edit this and future jobs"
+                      onClick={() => onEditSeries(j)}
+                    >
+                      <Edit2 size={14} />
+                      Edit + Future
+                    </button>
+                    <button
+                      className="action-danger"
+                      title="Delete this occurrence"
+                      onClick={() => onDeleteJob(j)}
+                    >
+                      <Trash2 size={14} />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* Footer */}
+        <div className="modal-actions" style={{ marginTop: 16 }}>
+          <button className="btn btn-secondary" onClick={onClose}>
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
 const Dashboard = () => {
+  const [seriesView, setSeriesView] = useState({ open: false, seriesId: null })
   const [leads, setLeads] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [properties, setProperties] = useState([]);
@@ -1095,15 +1347,17 @@ const handleJobUpdate = async (updatedJob, scope) => {
       });
 
       // Update corresponding routing entry
-      const routingId = `${updatedJob.scheduledDate}-${customerNumber}`;
-      await updateDoc(doc(db, 'routing', routingId), {
-        jobType: updatedJob.serviceType,
-        revenue: `${updatedJob.rate}`,
-        dollarsPerManHour: updatedJob.manHours > 0 
-          ? updatedJob.rate / updatedJob.manHours 
-          : 0,
-        lastUpdated: serverTimestamp()
-      });
+     const route = routing.find(r => r.jobId === updatedJob.jobId);
+      if (route) {
+        await updateDoc(doc(db, 'routing', route.id), {
+          jobType: updatedJob.serviceType,
+          revenue: Number(updatedJob.rate || 0),
+          dollarsPerManHour: updatedJob.manHours > 0
+            ? Number(updatedJob.rate || 0) / Number(updatedJob.manHours || 0)
+            : 0,
+          lastUpdated: serverTimestamp()
+        });
+      }
 
     } else {
       // Update entire series - get all future jobs in this series
@@ -1129,17 +1383,18 @@ const handleJobUpdate = async (updatedJob, scope) => {
         });
 
         // Update corresponding routing entries
-        const routingId = `${job.scheduledDate}-${customerNumber}`;
-        const routingRef = doc(db, 'routing', routingId);
-        
-        batch.update(routingRef, {
-          jobType: updatedJob.serviceType,
-          revenue: `${updatedJob.rate}`,
-          dollarsPerManHour: updatedJob.manHours > 0 
-            ? updatedJob.rate / updatedJob.manHours 
-            : 0,
-          lastUpdated: serverTimestamp()
-        });
+        const route = routing.find(r => r.jobId === job.jobId);
+        if (route) {
+          const routingRef = doc(db, 'routing', route.id);
+          batch.update(routingRef, {
+            jobType: updatedJob.serviceType,
+            revenue: Number(updatedJob.rate || 0),
+            dollarsPerManHour: updatedJob.manHours > 0
+              ? Number(updatedJob.rate || 0) / Number(updatedJob.manHours || 0)
+              : 0,
+            lastUpdated: serverTimestamp()
+          });
+        }
       }
       
       await batch.commit();
@@ -1264,13 +1519,53 @@ const getNextServiceDate = (scheduledDate, serviceFrequency) => {
   return date.toISOString().split('T')[0];
 };
 
+const maintainJobSeries = async (completedJob, jobs, customers, routing) => {
+  if (!completedJob.isRecurring) return;
+
+  // Get all jobs in this series (sorted by date)
+  const seriesJobs = jobs
+    .filter(j => j.seriesId === completedJob.seriesId)
+    .sort((a, b) => new Date(a.scheduledDate) - new Date(b.scheduledDate));
+
+  // Always maintain 4 future jobs
+  const TARGET_FUTURE_JOBS = 4;
+  
+  // Count how many future jobs already exist
+  const existingFutureJobs = seriesJobs.filter(j => 
+    new Date(j.scheduledDate) > new Date(completedJob.scheduledDate)
+  ).length;
+
+  // Calculate how many new jobs we need to create
+  const jobsNeeded = TARGET_FUTURE_JOBS - existingFutureJobs;
+  
+  if (jobsNeeded > 0) {
+    const customer = customers.find(c => c.customerId === completedJob.customerId);
+    let lastDate = new Date(seriesJobs[seriesJobs.length - 1].scheduledDate);
+
+    for (let i = 0; i < jobsNeeded; i++) {
+      lastDate = new Date(getNextServiceDate(
+        lastDate.toISOString().split('T')[0], 
+        completedJob.serviceFrequency
+      ));
+      
+      if (!lastDate) break;
+
+      await createSingleJob({
+        ...completedJob,
+        scheduledDate: lastDate.toISOString().split('T')[0],
+        status: 'Pending'
+      }, customer, properties);
+    }
+  }
+};
+
+// Lead conversion
 
 const convertLead = async (lead, jobData) => {
   try {
     const customerId = getNextCustomerId();
     const customerNumber = parseInt(customerId.split('-')[1]);
-    
-    // 1. Create customer document
+
     const newCustomer = { 
       customerId, 
       firstName: lead.firstName || '', 
@@ -1280,8 +1575,7 @@ const convertLead = async (lead, jobData) => {
       email: lead.email || '',
       createdAt: serverTimestamp()
     };
-    
-    // 2. Create property document
+
     const propertyId = getNextPropertyId(customerNumber);
     const newProperty = {
       propertyId,
@@ -1298,16 +1592,23 @@ const convertLead = async (lead, jobData) => {
       createdAt: serverTimestamp()
     };
 
-    // 3. Create job document
+    // ✅ normalize rate logic
+    const finalRate = jobData.bidType === 'hourly'
+      ? parseFloat(jobData.hourlyRate) * parseFloat(jobData.estimatedHours)
+      : parseFloat(jobData.rate);
+
     const jobId = getNextJobId();
     const newJob = {
       jobId,
       customerId,
-      properties: [propertyId], // Link to the property
+      properties: [propertyId],
       serviceType: jobData.serviceType || 'Mowing',
       scheduledDate: jobData.scheduledDate,
       serviceFrequency: jobData.serviceFrequency || 'Weekly',
-      rate: parseFloat(jobData.rate) || 0,
+      estimatedRate: finalRate,
+      actualRate: null,
+      hourlyRate: jobData.bidType === 'hourly' ? parseFloat(jobData.hourlyRate) : null,
+      rate: finalRate,
       manHours: jobData.manHours || 0,
       notes: jobData.notes || '',
       customerName: `${newCustomer.firstName} ${newCustomer.lastName}`.trim(),
@@ -1320,9 +1621,11 @@ const convertLead = async (lead, jobData) => {
       createdAt: serverTimestamp()
     };
 
-    // 4. Create routing document
-    const routingId = `${jobData.scheduledDate}-${customerNumber}`;
+    const routingId = `${jobData.scheduledDate}-${customerNumber}-${jobId}`;
+
     const newRouting = {
+      id: routingId,                 
+      jobId,
       date: jobData.scheduledDate,
       customerNumber,
       customerNameFirst: newCustomer.firstName,
@@ -1331,36 +1634,24 @@ const convertLead = async (lead, jobData) => {
       serviceAddress: newProperty.serviceAddress,
       nextServiceDate: getNextServiceDate(jobData.scheduledDate, jobData.serviceFrequency),
       jobType: jobData.serviceType,
-      mowingBid: jobData.serviceType === 'Mowing' ? `${jobData.rate}` : '',
+      mowingBid: jobData.serviceType === 'Mowing' ? `${finalRate}` : '',
       onSite: '',
       offSite: '',
       manHours: jobData.manHours || 0,
       bidType: jobData.bidType || 'bid',
-      revenue: `${jobData.rate || 0}`,
-      dollarsPerManHour: jobData.manHours > 0 ? (jobData.rate || 0) / jobData.manHours : 0,
+      estimatedRevenue: finalRate,
+      revenue: finalRate, // ✅ pre-fill
+      dollarsPerManHour: jobData.manHours > 0 ? finalRate / jobData.manHours : 0,
       invoiceSent: 'No',
       createdAt: serverTimestamp()
     };
 
-    // Write all documents to Firestore in a batch
     const batch = writeBatch(db);
-    
-    // Add customer
     batch.set(doc(db, 'customers', customerId), newCustomer);
-    
-    // Add property
     batch.set(doc(db, 'properties', propertyId), newProperty);
-    console.log('=== CREATING PROPERTY ===');
-    console.log('propertyId:', propertyId);
-    console.log('newProperty data:', newProperty);
-    
-    // Add job
     batch.set(doc(db, 'jobs', jobId), newJob);
-    
-    // Add routing
     batch.set(doc(db, 'routing', routingId), newRouting);
-    
-    // Update lead status if it exists
+
     if (lead.id) {
       batch.update(doc(db, 'leads', lead.id), { 
         status: 'Converted',
@@ -1369,62 +1660,49 @@ const convertLead = async (lead, jobData) => {
       });
     }
 
-    // Commit the batch
     await batch.commit();
 
-    // Create future jobs if recurring
-    // Create future jobs if recurring (create 4 total including the first one)
-if (newJob.isRecurring) {
-  let currentDate = jobData.scheduledDate;
-  const batch2 = writeBatch(db);
-  
-  for (let i = 0; i < 3; i++) { // create 3 more (4 total including initial)
-    const nextDate = getNextServiceDate(currentDate, jobData.serviceFrequency);
-    if (!nextDate) break;
-    
-    const customerNumber = parseInt(newCustomer.customerId.split('-')[1]);
-    const nextJobId = `J-${new Date().getFullYear()}-${Date.now()}-${Math.floor(Math.random() * 1000)}-${i}`;
-    const nextRoutingId = `${nextDate}-${customerNumber}`;
+    // future jobs if recurring
+    if (newJob.isRecurring) {
+      let currentDate = jobData.scheduledDate;
+      const batch2 = writeBatch(db);
+      for (let i = 0; i < 3; i++) {
+        const nextDate = getNextServiceDate(currentDate, jobData.serviceFrequency);
+        if (!nextDate) break;
 
-    // Create job in batch
-    batch2.set(doc(db, 'jobs', nextJobId), {
-      ...newJob,
-      jobId: nextJobId,
-      scheduledDate: nextDate,
-      status: 'Scheduled',
-      createdAt: serverTimestamp()
-    });
+        const nextJobId = getNextJobId();
+        const nextRoutingId = `${nextDate}-${customerNumber}-${nextJobId}`;
 
-    // Create routing entry in batch  
-    batch2.set(doc(db, 'routing', nextRoutingId), {
-      ...newRouting,
-      date: nextDate,
-      createdAt: serverTimestamp()
-    });
+        batch2.set(doc(db, 'jobs', nextJobId), {
+          ...newJob,
+          jobId: nextJobId,
+          scheduledDate: nextDate,
+          createdAt: serverTimestamp()
+        });
 
-    currentDate = nextDate;
-  }
-  
-  await batch2.commit();
-}
+        batch2.set(doc(db, 'routing', nextRoutingId), {
+          ...newRouting,
+          id: nextRoutingId,
+          jobId: nextJobId,
+          date: nextDate,
+          createdAt: serverTimestamp()
+        });
+
+
+        currentDate = nextDate;
+      }
+      await batch2.commit();
+    }
 
     setModalOpen(false);
     setSelectedLead(null);
-    
-    setOperationMessage({
-      show: true,
-      text: 'Successfully converted lead to customer!',
-      isError: false
-    });
+    setOperationMessage({ show: true, text: 'Successfully converted lead to customer!', isError: false });
   } catch (error) {
     console.error('Error converting lead:', error);
-    setOperationMessage({
-      show: true,
-      text: `Error converting lead: ${error.message}`,
-      isError: true
-    });
+    setOperationMessage({ show: true, text: `Error converting lead: ${error.message}`, isError: true });
   }
 };
+
 
   const openConversionModal = (lead) => {
     setSelectedLead(lead);
@@ -1435,15 +1713,14 @@ if (newJob.isRecurring) {
 const createSingleJob = async (jobData, customer, properties) => {
   const jobId = getNextJobId();
   const customerNumber = parseInt(jobData.customerId.split('-')[1]);
-  
-  // Handle property selection/creation
+
   let propertyId = jobData.propertyId;
   let serviceAddress = jobData.serviceAddress || '';
-  
+
   if (jobData.isNewProperty && jobData.serviceAddress) {
     propertyId = getNextPropertyId(customerNumber);
     serviceAddress = jobData.serviceAddress;
-    
+
     const newProperty = {
       propertyId,
       customerNumber,
@@ -1458,11 +1735,14 @@ const createSingleJob = async (jobData, customer, properties) => {
       active: true,
       createdAt: new Date().toISOString()
     };
-    
     await setDoc(doc(db, 'properties', propertyId), newProperty);
   }
 
-  // Create job document
+  // ✅ normalize rate
+  const finalRate = jobData.bidType === 'hourly'
+    ? parseFloat(jobData.hourlyRate) * parseFloat(jobData.estimatedHours)
+    : parseFloat(jobData.rate);
+
   const newJob = {
     jobId,
     customerId: jobData.customerId,
@@ -1470,7 +1750,10 @@ const createSingleJob = async (jobData, customer, properties) => {
     serviceType: jobData.serviceType || 'Mowing',
     scheduledDate: jobData.scheduledDate,
     serviceFrequency: jobData.serviceFrequency || 'Weekly',
-    rate: jobData.rate || 0,
+    estimatedRate: finalRate,
+    actualRate: null,
+    hourlyRate: jobData.bidType === 'hourly' ? parseFloat(jobData.hourlyRate) : null,
+    rate: finalRate,
     manHours: jobData.manHours || 0,
     notes: jobData.notes || '',
     customerName: `${customer.firstName || ''} ${customer.lastName || ''}`.trim(),
@@ -1485,9 +1768,10 @@ const createSingleJob = async (jobData, customer, properties) => {
 
   await setDoc(doc(db, 'jobs', jobId), newJob);
 
-  // Create routing entry
-  const routingId = `${jobData.scheduledDate}-${customerNumber}`;
+   const routingId = `${jobData.scheduledDate}-${customerNumber}-${jobId}`;
   const newRouting = {
+    id: routingId,
+    jobId,
     date: jobData.scheduledDate,
     customerNumber,
     customerNameFirst: customer.firstName || '',
@@ -1496,13 +1780,14 @@ const createSingleJob = async (jobData, customer, properties) => {
     serviceAddress,
     nextServiceDate: getNextServiceDate(jobData.scheduledDate, jobData.serviceFrequency),
     jobType: jobData.serviceType,
-    mowingBid: jobData.serviceType === 'Mowing' ? `${jobData.rate}` : '',
+    mowingBid: jobData.serviceType === 'Mowing' ? `${finalRate}` : '',
     onSite: '',
     offSite: '',
     manHours: jobData.manHours || 0,
     bidType: jobData.bidType || 'bid',
-    revenue: `${jobData.rate || 0}`,
-    dollarsPerManHour: jobData.manHours > 0 ? (jobData.rate || 0) / jobData.manHours : 0,
+    estimatedRevenue: finalRate,
+    revenue: finalRate, // ✅ pre-fill
+    dollarsPerManHour: jobData.manHours > 0 ? finalRate / jobData.manHours : 0,
     invoiceSent: jobData.status === 'Pending' ? 'Pending' : 'No',
     createdAt: new Date().toISOString()
   };
@@ -1511,6 +1796,7 @@ const createSingleJob = async (jobData, customer, properties) => {
 
   return { jobId, seriesId: newJob.seriesId, baseJobId: newJob.baseJobId };
 };
+
 
 const createFutureJobs = async (baseJobData, customer, properties, maxJobs = 4) => {
   if (baseJobData.serviceFrequency === 'One-Time' || 
@@ -1539,6 +1825,7 @@ const createFutureJobs = async (baseJobData, customer, properties, maxJobs = 4) 
 
   // Create job for existing customer
 const createJobForExistingCustomer = async (jobData) => {
+   console.log('createJobForExistingCustomer received:', jobData);
   try {
     const customer = customers.find(c => c.customerId === jobData.customerId);
     if (!customer) throw new Error('Customer not found');
@@ -1548,7 +1835,7 @@ const createJobForExistingCustomer = async (jobData) => {
 
     // Create future jobs if recurring
     if (jobData.serviceFrequency !== 'One-Time' && jobData.serviceFrequency !== 'As-Needed') {
-      const jobsToCreate = jobData.serviceFrequency === 'Bi-Weekly' ? 3 : 1;
+      const jobsToCreate = jobData.serviceFrequency === 'Bi-Weekly' ? 1 : 1;
       await createFutureJobs({
         ...jobData,
         seriesId,
@@ -1573,65 +1860,83 @@ const createJobForExistingCustomer = async (jobData) => {
 
   // Route editing
 const handleRouteUpdate = async (routeId, field, value) => {
-  // helper: parse "HH:MM" (or "HH:MM:SS") to minutes from midnight
-  const parseHHMM = (hhmm) => {
-    if (!hhmm) return null;
-    const parts = hhmm.split(':').map(Number);
-    if (parts.length < 2 || parts.some(Number.isNaN)) return null;
-    const [h, m] = parts;
-    return h * 60 + m;
-  };
-
   try {
-    const route = routing.find(r => `${r.date}-${r.customerNumber}` === routeId);
+    const route = routing.find(r => r.id === routeId);
     if (!route) return;
 
-    const prevValue = route[field];
+    const job = jobs.find(j => j.jobId === route?.jobId);
+
+    if (!job) return;
+
     const updatedData = { [field]: value };
 
-    // Recalculate manHours when onSite/offSite change
+    // If we're updating times, recompute hours/revenue
     if (field === 'onSite' || field === 'offSite') {
-      const onMin  = parseHHMM(field === 'onSite' ? value : route.onSite);
-      const offMin = parseHHMM(field === 'offSite' ? value : route.offSite);
+      const next = { ...route, [field]: value };
+      const onStr = next.onSite;
+      const offStr = next.offSite;
 
-      if (onMin != null && offMin != null) {
-        let diffMin = offMin - onMin;
-        if (diffMin < 0) diffMin += 24 * 60; // overnight safety
-        const manHours = +(diffMin / 60).toFixed(2);
+      const parseTime = (timeStr) => {
+        if (!timeStr) return null;
+        const [hours, minutes] = timeStr.split(':').map(Number);
+        return hours * 60 + minutes;
+      };
 
-        // revenue can be number or "$75" string
-        const revenueNum =
-          typeof route.revenue === 'number'
-            ? route.revenue
-            : parseFloat(String(route.revenue).replace(/[$,]/g, '')) || 0;
+      const onMinutes = parseTime(onStr);
+      const offMinutes = parseTime(offStr);
 
-        updatedData.manHours = manHours;
-        updatedData.dollarsPerManHour = manHours > 0 ? +(revenueNum / manHours).toFixed(2) : 0;
+      if (onMinutes !== null && offMinutes !== null && offMinutes > onMinutes) {
+        const hrs = Number(((offMinutes - onMinutes) / 60).toFixed(2));
+        updatedData.manHours = hrs;
+
+        if (String(job.bidType || '').toLowerCase() === 'hourly') {
+          const rate = Number(job.hourlyRate || 0);
+          updatedData.revenue = Number((rate * hrs).toFixed(2));
+          updatedData.dollarsPerManHour = hrs > 0 ? Number((rate * hrs) / hrs) : 0;
+        } else {
+          const bidAmount = Number(job.rate || 0);
+          updatedData.revenue = bidAmount; // always flat
+          updatedData.dollarsPerManHour = hrs > 0
+            ? Number((bidAmount / hrs).toFixed(2))
+            : 0;
+        }
       } else {
+        // times not valid -> reset
         updatedData.manHours = 0;
-        updatedData.dollarsPerManHour = 0;
+        if (String(job.bidType || '').toLowerCase() === 'hourly') {
+          updatedData.revenue = null;
+          updatedData.dollarsPerManHour = job.hourlyRate || 0;
+        } else {
+          updatedData.revenue = Number(job.rate || 0);
+          updatedData.dollarsPerManHour = 0;
+        }
       }
+
+      if ('revenue' in updatedData) updatedData.revenue = Number(updatedData.revenue ?? 0);
+      if ('dollarsPerManHour' in updatedData) updatedData.dollarsPerManHour = Number(updatedData.dollarsPerManHour ?? 0);
+      if ('manHours' in updatedData) updatedData.manHours = Number(updatedData.manHours ?? 0);
     }
 
-    // Persist the route changes first
+    console.log('about to save updatedData:', updatedData);
     await updateDoc(doc(db, 'routing', routeId), updatedData);
 
-    // If invoice goes from No -> Yes, mark job complete and maintain future jobs (once)
-    if (field === 'invoiceSent' && prevValue !== 'Yes' && value === 'Yes') {
-      const job = jobs.find(j =>
-        j.scheduledDate === route.date &&
-        parseInt(j.customerId.split('-')[1]) === route.customerNumber
-      );
+    // Mark complete + spawn future jobs when invoiced
+    if (field === 'invoiceSent' && value === 'Yes' && job) {
+      const actualRevenue =
+        updatedData.revenue !== undefined
+          ? Number(updatedData.revenue)
+          : Number(route.revenue ?? job.rate ?? 0);
 
-      if (job) {
-        await updateDoc(doc(db, 'jobs', job.jobId), {
-          status: 'Complete',
-          completedAt: new Date().toISOString()
-        });
+      await updateDoc(doc(db, 'jobs', job.jobId), {
+        status: 'Complete',
+        completedAt: new Date().toISOString(),
+        actualRate: actualRevenue
+      });
 
-        if (job.isRecurring) {
-          await maintainRecurringJobs(job, jobs, customers, getNextServiceDate);
-        }
+      if (job.isRecurring) {
+        const nextDate = getNextServiceDate(job.scheduledDate, job.serviceFrequency);
+        if (nextDate) await createRecurringJobInstance(job, nextDate, customers);
+        await maintainRecurringJobs(job, jobs, customers, getNextServiceDate, routing);
       }
     }
   } catch (error) {
@@ -1644,89 +1949,91 @@ const handleRouteUpdate = async (routeId, field, value) => {
   }
 };
 
+
+
   // Filter routing by selected date
-const filteredRouting = useMemo(() => {
-  return routing.filter(route => route.date === selectedDate);
-}, [routing, selectedDate]);
+  const filteredRouting = useMemo(() => {
+    return routing.filter(route => route.date === selectedDate);
+  }, [routing, selectedDate]);
 
-// Analytics
-const analytics = useMemo(() => {
-  const completedJobs = routing.filter(r => r.invoiceSent === 'Yes');
-  const totalRevenue = completedJobs.reduce((sum, job) => sum + (parseFloat(job.revenue?.replace(/[$,]/g, '') || 0)), 0);
-  const totalHours = completedJobs.reduce((sum, job) => sum + (parseFloat(job.manHours) || 0), 0);
-  const avgDollarPerHour = totalHours > 0 ? totalRevenue / totalHours : 0;
-  
-  // Group by month for time-based analysis
-  const monthlyData = {};
-  completedJobs.forEach(job => {
-    const date = new Date(job.date);
-    const monthYear = `${date.toLocaleString('default', { month: 'short' })} ${date.getFullYear()}`;
+  // Analytics
+  const analytics = useMemo(() => {
+    const completedJobs = routing.filter(r => r.invoiceSent === 'Yes');
+    const totalRevenue = completedJobs.reduce((sum, job) => sum + (Number(job.revenue ?? 0)), 0);
+    const totalHours = completedJobs.reduce((sum, job) => sum + (parseFloat(job.manHours) || 0), 0);
+    const avgDollarPerHour = totalHours > 0 ? totalRevenue / totalHours : 0;
     
-    if (!monthlyData[monthYear]) {
-      monthlyData[monthYear] = {
-        revenue: 0,
-        hours: 0,
-        jobs: []
-      };
-    }
-    
-    const revenue = parseFloat(job.revenue?.replace(/[$,]/g, '') || 0);
-    const hours = parseFloat(job.manHours) || 0;
-    
-    monthlyData[monthYear].revenue += revenue;
-    monthlyData[monthYear].hours += hours;
-    monthlyData[monthYear].jobs.push({
-      revenue,
-      hours,
-      dollarsPerHour: hours > 0 ? revenue / hours : 0
+    // Group by month for time-based analysis
+    const monthlyData = {};
+    completedJobs.forEach(job => {
+      const date = new Date(job.date);
+      const monthYear = `${date.toLocaleString('default', { month: 'short' })} ${date.getFullYear()}`;
+      
+      if (!monthlyData[monthYear]) {
+        monthlyData[monthYear] = {
+          revenue: 0,
+          hours: 0,
+          jobs: []
+        };
+      }
+      
+      const revenue = Number(job.revenue ?? 0);
+      const hours = parseFloat(job.manHours) || 0;
+      
+      monthlyData[monthYear].revenue += revenue;
+      monthlyData[monthYear].hours += hours;
+      monthlyData[monthYear].jobs.push({
+        revenue,
+        hours,
+        dollarsPerHour: hours > 0 ? revenue / hours : 0
+      });
     });
-  });
 
-  // Sort months chronologically
-  const sortedMonths = Object.keys(monthlyData).sort((a, b) => {
-    return new Date(a) - new Date(b);
-  });
+    // Sort months chronologically
+    const sortedMonths = Object.keys(monthlyData).sort((a, b) => {
+      return new Date(a) - new Date(b);
+    });
 
 const timeChartData = {
-labels: sortedMonths,
-datasets: [
-  {
-    label: 'Revenue ($)',
-    data: sortedMonths.map(month => monthlyData[month].revenue),
-    borderColor: 'rgba(54, 162, 235, 1)',
-    backgroundColor: 'rgba(54, 162, 235, 0.1)',
-    borderWidth: 2,
-    tension: 0.3,
-    fill: true,
-    yAxisID: 'y'
-  },
-  {
-    label: 'Dollars per Man Hour ($)',
-    data: sortedMonths.map(month => {
-      const monthJobs = monthlyData[month].jobs;
-      const total = monthJobs.reduce((sum, job) => sum + job.dollarsPerHour, 0);
-      return monthJobs.length > 0 ? total / monthJobs.length : 0;
-    }),
-    borderColor: 'rgba(255, 99, 132, 1)',
-    backgroundColor: 'rgba(255, 99, 132, 0.1)',
-    borderWidth: 2,
-    tension: 0.3,
-    fill: true,
-    yAxisID: 'y1'
-  }
-]
+  labels: sortedMonths,
+  datasets: [
+    {
+      label: 'Revenue ($)',
+      data: sortedMonths.map(month => monthlyData[month].revenue),
+      borderColor: 'rgba(54, 162, 235, 1)',
+      backgroundColor: 'rgba(54, 162, 235, 0.1)',
+      borderWidth: 2,
+      tension: 0.3,
+      fill: true,
+      yAxisID: 'y'
+    },
+    {
+      label: 'Dollars per Man Hour ($)',
+      data: sortedMonths.map(month => {
+        const monthJobs = monthlyData[month].jobs;
+        const total = monthJobs.reduce((sum, job) => sum + job.dollarsPerHour, 0);
+        return monthJobs.length > 0 ? total / monthJobs.length : 0;
+      }),
+      borderColor: 'rgba(255, 99, 132, 1)',
+      backgroundColor: 'rgba(255, 99, 132, 0.1)',
+      borderWidth: 2,
+      tension: 0.3,
+      fill: true,
+      yAxisID: 'y1'
+    }
+  ]
 };
 
-  return { 
-    totalRevenue, 
-    totalHours, 
-    avgDollarPerHour, 
-    activeCustomers: customers.length, 
-    pendingLeads: leads.filter(l => l.status === 'New').length, 
-    scheduledJobs: jobs.filter(j => j.status === 'Scheduled').length,
-    timeChartData
-  };
-}, [routing, customers, leads, jobs]);
+    return { 
+      totalRevenue, 
+      totalHours, 
+      avgDollarPerHour, 
+      activeCustomers: customers.length, 
+      pendingLeads: leads.filter(l => l.status === 'New').length, 
+      scheduledJobs: jobs.filter(j => j.status === 'Scheduled').length,
+      timeChartData
+    };
+  }, [routing, customers, leads, jobs]);
 
   const timeChartOptions = {
     responsive: true,
@@ -1797,7 +2104,7 @@ datasets: [
     { id: 'scheduling', label: 'Scheduling', icon: Calendar },
     { id: 'customers', label: 'Customers', icon: Users },
     { id: 'properties', label: 'Properties', icon: Layers },
-    { id: 'routing', label: 'Routing', icon: Map },
+    { id: 'routing', label: 'Routing', icon: MapIcon },
     { id: 'analytics', label: 'Analytics', icon: TrendingUp }
   ];
 
@@ -1939,18 +2246,36 @@ datasets: [
       <div className="card-grid">
         {(() => {
           // filter to show only one job per series (the base job)
-          const uniqueJobs = jobs.reduce((acc, job) => {
-            if (job.isRecurring) {
-              // for recurring jobs, only show the base job (first in series)
-              if (job.baseJobId === job.jobId) {
-                acc.push(job);
-              }
-            } else {
-              // for non-recurring jobs, show all
-              acc.push(job);
-            }
-            return acc;
-          }, []);
+         const uniqueJobs = jobs.reduce((acc, job) => {
+  if (job.isRecurring) {
+    // group by series and find next incomplete job
+    const seriesId = job.seriesId;
+    const existingSeries = acc.find(j => j.seriesId === seriesId);
+    
+    if (!existingSeries) {
+      // find all jobs in this series
+      const seriesJobs = jobs
+        .filter(j => j.seriesId === seriesId)
+        .sort((a, b) => new Date(a.scheduledDate) - new Date(b.scheduledDate));
+      
+      // find next incomplete job
+      const today = new Date().toISOString().split('T')[0];
+      const nextJob = seriesJobs.find(j => 
+        j.status !== 'Complete' && j.scheduledDate >= today
+      ) || seriesJobs.find(j => j.status !== 'Complete');
+      
+      if (nextJob) {
+        acc.push(nextJob);
+      }
+    }
+  } else {
+    // for non-recurring jobs, show if not complete
+    if (job.status !== 'Complete') {
+      acc.push(job);
+    }
+  }
+  return acc;
+}, []);
 
           return uniqueJobs.map(job => (
             <div key={job.jobId} className="card job-card">
@@ -1996,20 +2321,23 @@ datasets: [
                         setEditModalOpen(true);
                         setActiveMenu(null);
                       }}>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                          <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-                          <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-                        </svg>
                         Edit This Job
                       </button>
-                      
+                      <button onClick={() => {
+                        setSeriesView({ open: true, seriesId: job.seriesId });
+                        setActiveMenu(null);
+                      }}>
+                        View Series
+                      </button>
                       <button onClick={async () => {
-                        if (window.confirm('Delete this single job occurrence?')) {
-                          await deleteDoc(doc(db, 'jobs', job.jobId));
+                        if (window.confirm('delete this single job occurrence?')) {
+                          await deleteDoc(doc(db, 'jobs', job.id));
+                          const route = routing.find(r => r.jobId === job.jobId);
+                          if (route) await deleteDoc(doc(db, 'routing', route.id));
                           setActiveMenu(null);
                         }
                       }}>
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                           <path d="M3 6h18"/>
                           <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
                         </svg>
@@ -2021,22 +2349,22 @@ datasets: [
                           <div className="menu-divider"></div>
                           <button onClick={() => {
                             const baseJob = jobs.find(j => j.seriesId === job.seriesId && j.jobId === j.baseJobId);
-                            setJobToEdit(baseJob);
+                            setJobToEdit(baseJob || job); // fallback just in case
                             setEditScope('series');
                             setEditModalOpen(true);
                             setActiveMenu(null);
                           }}>
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>
-                            </svg>
                             Edit Entire Series
                           </button>
-                          
-                          <button onClick={async () => {
-                            if (window.confirm('Delete ALL jobs in this series?')) {
+                         <button onClick={async () => {
+                            if (window.confirm('delete ALL jobs in this series?')) {
                               const seriesJobs = jobs.filter(j => j.seriesId === job.seriesId);
                               const batch = writeBatch(db);
-                              seriesJobs.forEach(j => batch.delete(doc(db, 'jobs', j.jobId)));
+                              seriesJobs.forEach(j => {
+                                batch.delete(doc(db, 'jobs', j.jobId));
+                                const route = routing.find(r => r.jobId === j.jobId);
+                                if (route) batch.delete(doc(db, 'routing', route.id));
+                              });
                               await batch.commit();
                               setActiveMenu(null);
                             }
@@ -2296,7 +2624,7 @@ datasets: [
               </div>
               {filteredRouting.length === 0 ? (
                 <div className="empty-state">
-                  <Map className="empty-state-icon" />
+                  <MapIcon className="empty-state-icon" />
                   <p>no routes scheduled for { selectedDate }.</p>
                   <p className="text-sm">Convert a lead or create a job to add to the route.</p>
                 </div>
@@ -2304,94 +2632,120 @@ datasets: [
              <div className="routing-container">
   <div className="routing-grid">
     {filteredRouting.map(route => {
-      const routeId = `${route.date}-${route.customerNumber}`;
-      const isCompleted = route.onSite && route.offSite;
-      const needsInvoice = isCompleted && route.invoiceSent === 'No';
+  const routeId = route.id;
+  const isCompleted = route.onSite && route.offSite;
+  const needsInvoice = isCompleted && route.invoiceSent === 'No';
+  
+  // Find the corresponding job to determine bid type
+  const job = jobs.find(j => j.jobId === route.jobId);
 
-      const routeServices = route.jobType ? [route.jobType] : [];
+console.log('found job:', job);
+console.log('job bidType:', job?.bidType);
+console.log('job rate:', job?.rate);
+console.log('job estimatedRate:', job?.estimatedRate);
+console.log('job hourlyRate:', job?.hourlyRate)
+  
+  const isHourlyJob = job?.bidType === 'hourly';
+  
+  return (
+    <div className={`routing-card ${isCompleted ? 'completed' : 'pending'} ${needsInvoice ? 'needs-invoice' : ''} ${isHourlyJob ? 'hourly-job' : 'bid-job'}`} key={routeId}>
       
-      return (
-        <div className={`routing-card ${isCompleted ? 'completed' : 'pending'} ${needsInvoice ? 'needs-invoice' : ''}`} key={routeId}>
+      {/* Status indicator dot */}
+      <div className="status-dot"></div>
+      
+      {/* Service header with job type indicator */}
+      <div className="service-header">
+        <div className="service-address-container">
+          <div className="service-address">{route.serviceAddress}</div>
           
-          {/* Status indicator dot */}
-          <div className="status-dot"></div>
-          
-          {/* Service header */}
-          <div className="service-header">
-            <div className="service-address">{route.serviceAddress}</div>
-            <div className="revenue-badge">
-              {formatCurrency(route.revenue || 0)}
-            </div>
-          </div>
-
-          {/* Customer details */}
-          <div className="customer-details">
-            <div className="customer-name">
-              {route.customerNameFirst} {route.customerNameLast}
-            </div>
-            <div className="services-list">
-            {route.jobType ? (
-              <span className={`service-tag ${route.jobType.toLowerCase().replace(/\s+/g, '-')}`}>
-                {route.jobType}
-              </span>
-            ) : (
-              <span className="service-tag">no service type specified</span>
-            )}
-          </div>
-          </div>
-
-          {/* Time tracking section */}
-          <div className="time-section">
-            <div className="time-inputs">
-              <div className="time-input-group">
-                <label>on site</label>
-                <input
-                  type="time"
-                  value={route.onSite || ''}
-                  onChange={(e) => handleRouteUpdate(routeId, 'onSite', e.target.value)}
-                  className="cute-time-input"
-                />
-              </div>
-              <div className="time-input-group">
-                <label>off site</label>
-                <input
-                  type="time"
-                  value={route.offSite || ''}
-                  onChange={(e) => handleRouteUpdate(routeId, 'offSite', e.target.value)}
-                  className="cute-time-input"
-                />
-              </div>
-            </div>
-            
-            {/* Calculated values */}
-            <div className="calculated-stats">
-              <div className="stat-pill readonly">
-                <span className="stat-value">{parseFloat(route.manHours || 0).toFixed(1)}</span>
-                <span className="stat-label">hrs</span>
-              </div>
-              <div className="stat-pill readonly">
-                <span className="stat-value">{formatCurrency(route.dollarsPerManHour || 0)}</span>
-                <span className="stat-label">/hr</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Invoice status */}
-          <div className="invoice-section">
-            <label className="invoice-label">invoice status</label>
-            <select
-              value={route.invoiceSent || 'No'}
-              onChange={(e) => handleRouteUpdate(routeId, 'invoiceSent', e.target.value)}
-              className={`cute-select ${route.invoiceSent === 'Yes' ? 'sent' : 'pending'}`}
-            >
-              <option value="No">pending</option>
-              <option value="Yes">sent</option>
-            </select>
-          </div>
-
         </div>
-      );
-    })}
+        <div className="revenue-badge">
+          {isHourlyJob ? (
+            route.revenue != null
+              ? <span><span className="badge-label">revenue:</span> {formatCurrency(route.revenue)}</span>
+              : <span className="badge-placeholder">pending</span>
+          ) : (
+            <span><span className="badge-label">flat rate:</span> {formatCurrency(job?.rate || job?.estimatedRate || route.estimatedRevenue || 0)}</span>
+          )}
+        </div>
+
+      </div>
+
+      {/* Customer details */}
+      <div className="customer-details">
+        <div className="customer-name">
+          {route.customerNameFirst} {route.customerNameLast}
+        </div>
+        <div className="services-list">
+          {route.jobType ? (
+            <span className={`service-tag ${route.jobType.toLowerCase().replace(/\s+/g, '-')}`}>
+              {route.jobType}
+            </span>
+          ) : (
+            <span className="service-tag">no service type specified</span>
+          )}
+        </div>
+      </div>
+
+      {/* Time tracking section */}
+      <div className="time-section">
+        <div className="time-inputs">
+          <div className="time-input-group">
+            <label>on site</label>
+            <input
+              type="time"
+              value={route.onSite || ''}
+              onChange={(e) => handleRouteUpdate(routeId, 'onSite', e.target.value)}
+              className="cute-time-input"
+            />
+          </div>
+          <div className="time-input-group">
+            <label>off site</label>
+            <input
+              type="time"
+              value={route.offSite || ''}
+              onChange={(e) => handleRouteUpdate(routeId, 'offSite', e.target.value)}
+              className="cute-time-input"
+            />
+          </div>
+        </div>
+        
+        {/* Calculated values with different labels for hourly vs bid */}
+        <div className="calculated-stats">
+          <div className="stat-pill readonly">
+            <span className="stat-value">{parseFloat(route.manHours || 0).toFixed(1)}</span>
+            <span className="stat-label">hrs</span>
+          </div>
+          <div className="stat-pill readonly">
+            <span className="stat-value">
+              {isHourlyJob
+                ? formatCurrency(route.dollarsPerManHour || job?.hourlyRate || 0)
+                : formatCurrency(route.dollarsPerManHour || 0)
+              }
+            </span>
+            <span className="stat-label">
+              {isHourlyJob ? 'rate' : '/hr'}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      {/* Invoice status */}
+      <div className="invoice-section">
+        <label className="invoice-label">invoice status</label>
+        <select
+          value={route.invoiceSent || 'No'}
+          onChange={(e) => handleRouteUpdate(routeId, 'invoiceSent', e.target.value)}
+          className={`cute-select ${route.invoiceSent === 'Yes' ? 'sent' : 'pending'}`}
+        >
+          <option value="No">pending</option>
+          <option value="Yes">sent</option>
+        </select>
+      </div>
+
+    </div>
+  );
+})}
   </div>
 </div>
               )}
@@ -2489,6 +2843,22 @@ datasets: [
         initialEditScope={editScope}
         onSave={handleJobUpdate}
       />
+
+   <SeriesViewModal
+   isOpen={seriesView.open}
+   onClose={() => setSeriesView({ open:false, seriesId:null })}
+   seriesId={seriesView.seriesId}
+   jobs={jobs}
+   routing={routing}
+   onEditJob={(j) => { setJobToEdit(j); setEditScope('single'); setEditModalOpen(true); }}
+   onEditSeries={(j) => { setJobToEdit(j); setEditScope('series'); setEditModalOpen(true); }}
+   onDeleteJob={async (j) => {
+     if (!window.confirm('delete this single job occurrence?')) return;
+     await deleteDoc(doc(db,'jobs', j.jobId));
+     const route = routing.find(r => r.jobId === j.jobId);
+     if (route) await deleteDoc(doc(db,'routing', route.id));
+   }}
+ />
 
       <OperationMessageModal
         isOpen={operationMessage.show}
